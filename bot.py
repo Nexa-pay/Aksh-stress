@@ -1,11 +1,10 @@
-# app.py - Combined Flask Web Server + Telegram Bot
+# app.py - Final Working Version for Railway
 import os
 import logging
 import random
 import string
 import aiohttp
 import asyncio
-import threading
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -37,7 +36,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def index():
-    return "🤖 Attack Bot is Running!"
+    return "🤖 Attack Bot is Running! Send /start on Telegram."
 
 @flask_app.route('/health')
 def health():
@@ -832,9 +831,18 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("✅ All operations cancelled!")
 
-# ===== RUN BOT IN BACKGROUND =====
-def run_bot():
-    """Run the Telegram bot"""
+# ===== MAIN =====
+def main():
+    """Main function to run both Flask and Telegram bot"""
+    print("=" * 50)
+    print("Starting Attack Bot on Railway...")
+    print("=" * 50)
+    
+    # Create event loop for the main thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    # Build the application
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     # Add handlers
@@ -874,21 +882,20 @@ def run_bot():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_add_admin))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_remove_admin))
     
+    # Initialize the application
+    loop.run_until_complete(app.initialize())
+    loop.run_until_complete(app.start())
+    
+    logger.info("✅ Bot initialized and ready!")
+    
+    # Start polling in background
+    loop.create_task(app.updater.start_polling(allowed_updates=Update.ALL_TYPES))
+    
     logger.info("🤖 Bot started polling for updates...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-# ===== MAIN =====
-if __name__ == "__main__":
-    print("=" * 50)
-    print("Starting Attack Bot on Railway...")
-    print("=" * 50)
     
-    # Start bot in background thread
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    
-    logger.info("✅ Bot thread started!")
-    
-    # Run Flask web server for healthcheck
+    # Run Flask in the same thread (blocking)
     logger.info(f"🌐 Web server running on port {PORT}")
     flask_app.run(host='0.0.0.0', port=PORT)
+
+if __name__ == "__main__":
+    main()
