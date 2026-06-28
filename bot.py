@@ -1,11 +1,13 @@
-# bot.py - Optimized for Railway
+# app.py - Combined Flask Web Server + Telegram Bot
 import os
 import logging
 import random
 import string
 import aiohttp
 import asyncio
+import threading
 from datetime import datetime, timedelta
+from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler, 
@@ -30,6 +32,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Flask app for healthcheck
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def index():
+    return "🤖 Attack Bot is Running!"
+
+@flask_app.route('/health')
+def health():
+    return jsonify({
+        "status": "healthy",
+        "bot": "running",
+        "timestamp": datetime.now().isoformat()
+    })
+
 # ===== DATABASE =====
 class Database:
     def __init__(self, mongo_uri):
@@ -44,11 +61,9 @@ class Database:
                 self.logs = self.db.attack_logs
                 self.admins = self.db.admins
                 
-                # Create indexes
                 self.users.create_index("user_id", unique=True)
                 self.codes.create_index("code", unique=True)
                 
-                # Add owner as admin
                 if not self.admins.find_one({"user_id": OWNER_ID}):
                     self.admins.insert_one({
                         "user_id": OWNER_ID,
@@ -363,7 +378,6 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏱️ Duration: {duration}s"
         )
         
-        # Call the API
         result = await call_attack_api(target, port, duration, method, API_KEY)
         
         if result.get('success'):
@@ -372,8 +386,7 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"Target: `{target}:{port}`\n"
                 f"Duration: {duration}s\n"
                 f"Method: {method.upper()}\n"
-                f"Status: ✅ Success\n\n"
-                f"Response: {result.get('response', 'N/A')[:100]}",
+                f"Status: ✅ Success",
                 parse_mode='Markdown'
             )
             db.log_attack(update.effective_user.id, target, port, duration, method, 'success')
@@ -381,8 +394,7 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             error_msg = result.get('error', 'Unknown error')
             await status_msg.edit_text(
                 f"❌ *ATTACK FAILED*\n\n"
-                f"Error: {error_msg}\n\n"
-                f"Check API key or server status.",
+                f"Error: {error_msg}",
                 parse_mode='Markdown'
             )
             db.log_attack(update.effective_user.id, target, port, duration, method, 'failed', error_msg)
@@ -631,7 +643,6 @@ async def process_edit_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_days = int(parts[1])
         new_level = parts[2]
         
-        # Since we don't have edit method, delete and recreate
         if db.delete_code(code):
             if db.create_code(code, new_days, new_level, update.effective_user.id):
                 await update.message.reply_text(f"✅ Code `{code}` updated to {new_days} days ({new_level})!", parse_mode='Markdown')
@@ -821,13 +832,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("✅ All operations cancelled!")
 
-# ===== MAIN =====
-if __name__ == "__main__":
-    print("=" * 50)
-    print("Starting Attack Bot on Railway...")
-    print("=" * 50)
-    
-    # Create application
+# ===== RUN BOT IN BACKGROUND =====
+def run_bot():
+    """Run the Telegram bot"""
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     # Add handlers
@@ -867,7 +874,21 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_add_admin))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_remove_admin))
     
-    # Start polling (works on Railway)
-    print("✅ Bot started successfully!")
-    print("🤖 Bot is polling for updates...")
+    logger.info("🤖 Bot started polling for updates...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
+
+# ===== MAIN =====
+if __name__ == "__main__":
+    print("=" * 50)
+    print("Starting Attack Bot on Railway...")
+    print("=" * 50)
+    
+    # Start bot in background thread
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    
+    logger.info("✅ Bot thread started!")
+    
+    # Run Flask web server for healthcheck
+    logger.info(f"🌐 Web server running on port {PORT}")
+    flask_app.run(host='0.0.0.0', port=PORT)
