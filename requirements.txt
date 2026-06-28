@@ -1,4 +1,6 @@
+# requirements.txt - Add Brotli
 python-telegram-bot==20.3
 flask==3.0.0
 aiohttp==3.8.5
 python-dotenv==1.0.0
+brotli==1.1.0  # Add this for Brotli support
