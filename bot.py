@@ -1,4 +1,4 @@
-# app.py - Final Working Version for Railway
+# app.py - Complete Working Version
 import os
 import logging
 import random
@@ -882,19 +882,17 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_add_admin))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_remove_admin))
     
-    # Initialize the application
+    # Initialize and start the application
     loop.run_until_complete(app.initialize())
     loop.run_until_complete(app.start())
     
-    logger.info("✅ Bot initialized and ready!")
+    # Start polling
+    loop.run_until_complete(app.updater.start_polling(allowed_updates=Update.ALL_TYPES))
     
-    # Start polling in background
-    loop.create_task(app.updater.start_polling(allowed_updates=Update.ALL_TYPES))
+    logger.info("✅ Bot initialized and polling for updates!")
+    logger.info("🌐 Web server running on port %s", PORT)
     
-    logger.info("🤖 Bot started polling for updates...")
-    
-    # Run Flask in the same thread (blocking)
-    logger.info(f"🌐 Web server running on port {PORT}")
+    # Run Flask (blocking)
     flask_app.run(host='0.0.0.0', port=PORT)
 
 if __name__ == "__main__":
