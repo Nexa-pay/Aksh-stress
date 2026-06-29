@@ -1,4 +1,4 @@
-# app.py - Complete Bot with All Features (API-Only UDP)
+# app.py - Complete Bot with All Features (API-Only UDP) - FIXED
 import os
 import logging
 import asyncio
@@ -304,7 +304,7 @@ class Database:
                 return True
         return False
     
-    def log_attack(self, user_id, target, port, duration, method, status, concurrent_count=20):
+    def log_attack(self, user_id, target, port, duration, method, status, concurrent_count=20, response=None):
         log = {
             "user_id": user_id,
             "target": target,
@@ -313,6 +313,7 @@ class Database:
             "method": method,
             "status": status,
             "concurrent": concurrent_count,
+            "response": response[:500] if response else None,
             "timestamp": datetime.now()
         }
         if not self.memory_mode:
@@ -347,7 +348,6 @@ class AttackManager:
         self.active_attacks = {}
         self.attack_counter = 0
         self.lock = threading.Lock()
-        self.attack_logs = []
         self.total_attacks = 0
         self.concurrent_busy = 0
     
@@ -608,9 +608,11 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
         result = await send_20_concurrent_attacks(target, port, duration)
         
-        attack_manager.log_attack(
+        # Log the attack using db.log_attack
+        attack_info = db.log_attack(
             user_id, target, port, duration, "udp",
             "success" if result.get('success') else "failed",
+            result.get('successful', 0),
             str(result)
         )
         
@@ -725,6 +727,14 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
         result = await send_20_concurrent_attacks(target, port, duration)
+        
+        # Log the attack
+        db.log_attack(
+            user_id, target, port, duration, "udp",
+            "success" if result.get('success') else "failed",
+            result.get('successful', 0),
+            str(result)
+        )
         
         if result.get('success'):
             response_text = (
