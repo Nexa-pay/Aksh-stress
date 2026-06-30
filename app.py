@@ -1,4 +1,4 @@
-# app.py - Complete UDP Attack Bot with Real-time Alerts
+# app.py - Fixed: Premium Users Can Attack
 import os
 import logging
 import asyncio
@@ -66,8 +66,6 @@ class Database:
                 self.users.create_index("user_id", unique=True)
                 self.codes.create_index("code", unique=True)
                 
-                # Only add real owners (not hardcoded)
-                # Owner and Pseudo Owner will be added via bot commands
                 logger.info("✅ MongoDB connected")
             else:
                 raise Exception("No MongoDB URI")
@@ -170,7 +168,7 @@ class Database:
             self.admins.insert_one({
                 "user_id": user_id,
                 "username": username,
-                "level": level,  # owner, pseudo_owner, or admin
+                "level": level,
                 "added_by": added_by,
                 "added_at": datetime.now()
             })
@@ -328,7 +326,6 @@ class Database:
 db = Database(MONGO_URI)
 
 # ===== ADD FIRST ADMIN (OWNER) =====
-# Add owner if not exists
 if not db.get_admin_level(OWNER_ID):
     db.add_admin(OWNER_ID, "owner", "owner", OWNER_ID)
 
@@ -584,10 +581,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # Check if user has premium
+    # Check if user has premium OR is admin
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
     
+    # Allow attack if user has premium plan OR is admin
     if plan != "premium" and not is_admin:
         await update.message.reply_text(
             "❌ *PREMIUM REQUIRED*\n\n"
@@ -598,12 +596,18 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    if db.is_banned(user_id):
-        await update.message.reply_text("❌ You are banned!")
+    # Check if plan is expired
+    if plan == "premium" and expiry and expiry < datetime.now():
+        await update.message.reply_text(
+            "❌ *PLAN EXPIRED*\n\n"
+            "Your premium plan has expired.\n"
+            "Please redeem a new code to continue.",
+            parse_mode='Markdown'
+        )
         return
     
-    if not is_admin:
-        await update.message.reply_text("❌ Only admins can use /attack.")
+    if db.is_banned(user_id):
+        await update.message.reply_text("❌ You are banned!")
         return
     
     args = context.args
@@ -694,7 +698,7 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = query.from_user.id
     
-    # Check premium
+    # Check premium OR admin
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
     
@@ -703,6 +707,15 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ *PREMIUM REQUIRED*\n\n"
             "You need a premium plan to attack.\n"
             "Use `/redeem CODE` to activate.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    if plan == "premium" and expiry and expiry < datetime.now():
+        await query.edit_message_text(
+            "❌ *PLAN EXPIRED*\n\n"
+            "Your premium plan has expired.\n"
+            "Please redeem a new code.",
             parse_mode='Markdown'
         )
         return
@@ -733,7 +746,7 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.effective_user.id
     
-    # Check premium
+    # Check premium OR admin
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
     
@@ -742,13 +755,13 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['awaiting_attack'] = False
         return
     
-    if db.is_banned(user_id):
-        await update.message.reply_text("❌ You are banned!")
+    if plan == "premium" and expiry and expiry < datetime.now():
+        await update.message.reply_text("❌ Plan expired! Redeem new code.")
         context.user_data['awaiting_attack'] = False
         return
     
-    if not is_admin:
-        await update.message.reply_text("❌ Only admins can attack!")
+    if db.is_banned(user_id):
+        await update.message.reply_text("❌ You are banned!")
         context.user_data['awaiting_attack'] = False
         return
     
@@ -895,7 +908,6 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     codes = db.get_codes()
     active = len(attack_manager.active_attacks)
     
-    # Count premium users
     premium_users = sum(1 for u in users if u.get('plan') == 'premium')
     
     stats_text = (
@@ -1150,10 +1162,8 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
     admins = db.get_admins()
     keyboard = []
     
-    # Don't allow demoting the actual owner (who created the bot)
-    # But allow demoting pseudo_owner and admins
     for admin in admins:
-        if admin['user_id'] != OWNER_ID:  # Can't demote the main owner
+        if admin['user_id'] != OWNER_ID:
             level = admin.get('level', 'admin')
             keyboard.append([InlineKeyboardButton(f"❌ {admin['user_id']} ({level})", callback_data=f"demote_{admin['user_id']}")])
     
@@ -1175,7 +1185,6 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = int(query.data.split('_')[1])
     
-    # Prevent demoting the main owner
     if user_id == OWNER_ID:
         await query.edit_message_text("❌ Cannot demote the main owner!")
         return
@@ -1211,7 +1220,6 @@ async def process_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = int(update.message.text.strip())
         
-        # Prevent banning owner
         if user_id == OWNER_ID:
             await update.message.reply_text("❌ Cannot ban the main owner!")
             context.user_data['awaiting_ban'] = False
