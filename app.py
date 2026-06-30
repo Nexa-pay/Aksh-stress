@@ -1626,7 +1626,7 @@ def run_bot():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     application = app
     
-    # Commands
+    # ===== COMMAND HANDLERS (Highest Priority) =====
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("attack", attack_command))
     app.add_handler(CommandHandler("redeem", redeem_command))
@@ -1634,7 +1634,8 @@ def run_bot():
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("cancel", cancel))
     
-    # Callbacks - Main
+    # ===== CALLBACK QUERY HANDLERS =====
+    # Main
     app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
     app.add_handler(CallbackQueryHandler(my_plan_callback, pattern="^my_plan$"))
     app.add_handler(CallbackQueryHandler(info_callback, pattern="^info$"))
@@ -1661,11 +1662,32 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(owner_banned_users, pattern="^owner_banned_users$"))
     app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
     
-    # Messages - ORDER MATTERS!
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_attack))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_promote))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_ban))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_unban))
+    # ===== MESSAGE HANDLERS (Lowest Priority - Use specific filters) =====
+    # IMPORTANT: Order matters - most specific first
+    
+    # 1. Promote handler - expects "USER_ID ROLE" where ROLE is admin or pseudo_owner
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d+\s+(admin|pseudo_owner)$'), 
+        process_promote
+    ))
+    
+    # 2. Ban handler - expects "USER_ID" or "USER_ID reason"
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d+(\s+.+)?$'), 
+        process_ban
+    ))
+    
+    # 3. Unban handler - expects just "USER_ID"
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d+$'), 
+        process_unban
+    ))
+    
+    # 4. Attack handler - catches anything else (IP PORT TIME format)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND, 
+        process_attack
+    ))
     
     loop.run_until_complete(app.initialize())
     loop.run_until_complete(app.start())
