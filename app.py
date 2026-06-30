@@ -79,7 +79,7 @@ class Database:
     
     def add_user(self, user_id, username=None, first_name=None):
         if not self.memory_mode:
-            self.users.update_one(
+            result = self.users.update_one(
                 {"user_id": user_id},
                 {"$set": {
                     "username": username, 
@@ -92,6 +92,7 @@ class Database:
                 }},
                 upsert=True
             )
+            return result
         else:
             if user_id not in self.users:
                 self.users[user_id] = {
@@ -103,6 +104,8 @@ class Database:
                     "has_used_code": False,
                     "is_banned": False
                 }
+                return True
+            return False
     
     def get_user(self, user_id):
         if not self.memory_mode:
@@ -126,14 +129,17 @@ class Database:
     
     def update_user_plan(self, user_id, plan, expiry):
         if not self.memory_mode:
-            self.users.update_one(
+            result = self.users.update_one(
                 {"user_id": user_id},
                 {"$set": {"plan": plan, "plan_expiry": expiry}}
             )
+            return result.modified_count > 0
         else:
             if user_id in self.users:
                 self.users[user_id]["plan"] = plan
                 self.users[user_id]["plan_expiry"] = expiry
+                return True
+            return False
     
     def get_user_stats(self, user_id):
         if not self.memory_mode:
@@ -245,15 +251,21 @@ class Database:
         if not self.memory_mode:
             code_data = self.codes.find_one({"code": code, "is_used": False})
             if code_data:
+                # Mark code as used
                 self.codes.update_one(
                     {"code": code},
                     {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
                 )
+                # Update user plan
                 expiry = datetime.now() + timedelta(days=code_data['access_days'])
-                self.update_user_plan(user_id, "premium", expiry)
                 self.users.update_one(
                     {"user_id": user_id},
-                    {"$set": {"has_used_code": True, "code_used": code}}
+                    {"$set": {
+                        "plan": "premium",
+                        "plan_expiry": expiry,
+                        "has_used_code": True,
+                        "code_used": code
+                    }}
                 )
                 return code_data
         else:
@@ -261,9 +273,11 @@ class Database:
                 code_data = self.codes[code]
                 code_data["is_used"] = True
                 expiry = datetime.now() + timedelta(days=code_data['access_days'])
-                self.update_user_plan(user_id, "premium", expiry)
                 if user_id in self.users:
+                    self.users[user_id]["plan"] = "premium"
+                    self.users[user_id]["plan_expiry"] = expiry
                     self.users[user_id]["has_used_code"] = True
+                    self.users[user_id]["code_used"] = code
                 return code_data
         return None
     
@@ -325,15 +339,22 @@ class Database:
 
 db = Database(MONGO_URI)
 
-# ===== ADD FIRST ADMIN (OWNER) =====
-# Ensure owner exists in database
-owner_check = db.get_user(OWNER_ID)
-if not owner_check:
-    db.add_user(OWNER_ID, "owner", "Owner")
-    db.add_admin(OWNER_ID, "owner", "owner", OWNER_ID)
-else:
+# ===== INITIALIZE OWNER =====
+def init_owner():
+    """Ensure owner exists in database"""
+    owner = db.get_user(OWNER_ID)
+    if not owner:
+        db.add_user(OWNER_ID, "owner", "Owner")
+    
     if not db.is_admin(OWNER_ID):
         db.add_admin(OWNER_ID, "owner", "owner", OWNER_ID)
+    
+    # Ensure owner has premium
+    plan, expiry = db.get_user_plan(OWNER_ID)
+    if plan != "premium":
+        db.update_user_plan(OWNER_ID, "premium", datetime.now() + timedelta(days=3650))
+
+init_owner()
 
 # ===== ATTACK MANAGER =====
 class AttackManager:
@@ -603,6 +624,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if user is admin (can bypass premium check)
     is_admin = db.is_admin(user_id)
+    
+    # DEBUG: Log the user's plan
+    logger.info(f"User {user_id} - Plan: {plan}, Expiry: {expiry}, Is Admin: {is_admin}")
     
     if plan != "premium" and not is_admin:
         await update.message.reply_text(
@@ -1402,6 +1426,11 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Use /start to begin attacking!",
             parse_mode='Markdown'
         )
+        
+        # Verify the user was updated
+        verify = db.get_user(user_id)
+        logger.info(f"User {user_id} after redeem - Plan: {verify.get('plan') if verify else 'None'}")
+        
     else:
         await update.message.reply_text(
             "❌ *INVALID CODE*\n\n"
