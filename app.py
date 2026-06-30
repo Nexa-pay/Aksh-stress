@@ -178,6 +178,8 @@ class Database:
                 "added_by": added_by,
                 "added_at": datetime.now()
             })
+            # Give admin premium access
+            self.update_user_plan(user_id, "premium", None)
             return True
         else:
             if user_id in self.admins:
@@ -352,7 +354,7 @@ def init_owner():
     # Ensure owner has premium
     plan, expiry = db.get_user_plan(OWNER_ID)
     if plan != "premium":
-        db.update_user_plan(OWNER_ID, "premium", datetime.now() + timedelta(days=3650))
+        db.update_user_plan(OWNER_ID, "premium", None)  # None = lifetime
 
 init_owner()
 
@@ -628,26 +630,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # DEBUG: Log the user's plan
     logger.info(f"User {user_id} - Plan: {plan}, Expiry: {expiry}, Is Admin: {is_admin}")
     
-    if plan != "premium" and not is_admin:
-        await update.message.reply_text(
-            "❌ *ACCESS DENIED*\n\n"
-            "You need a redeem code to use this bot.\n"
-            "Contact an admin to get a code.\n\n"
-            "If you have a code, use:\n"
-            "`/redeem YOUR_CODE`",
-            parse_mode='Markdown'
-        )
-        return
-    
+    # FIXED: Allow ALL users to access the bot, just show their plan status
     stats = attack_manager.get_stats()
     total_attacks = db.get_user_stats(user_id)
     
-    plan_display = "💎 PREMIUM"
-    if expiry:
-        days_left = max(0, (expiry - datetime.now()).days)
-        plan_display += f" ({days_left}d left)"
+    if plan == "premium":
+        if expiry:
+            days_left = max(0, (expiry - datetime.now()).days)
+            plan_display = f"💎 PREMIUM ({days_left}d left)"
+        else:
+            plan_display = "💎 PREMIUM (Lifetime)"
     else:
-        plan_display = "💎 PREMIUM (Lifetime)"
+        plan_display = "🆓 FREE (Redeem code to upgrade)"
     
     first_name = user.first_name or "User"
     welcome_msg = (
@@ -655,13 +649,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Hello {first_name}! 👋\n"
         f"📊 Total Attacks: {total_attacks}\n"
         f"📊 Plan: {plan_display}\n"
-        f"⚡ 20x UDP Concurrent: ENABLED\n"
-        f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}"
+        f"⚡ 20x UDP Concurrent: {'ENABLED' if plan == 'premium' else '❌ PREMIUM ONLY'}\n"
+        f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}\n\n"
+        f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack to start attacking!'}"
     )
     
     keyboard = []
     if not db.is_banned(user_id):
-        keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
+        if plan == "premium":
+            keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
         keyboard.append([InlineKeyboardButton("👤 MY PLAN", callback_data="my_plan")])
     
     if is_admin:
@@ -692,7 +688,8 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ *PREMIUM REQUIRED*\n\n"
             "You need a premium plan to attack.\n"
-            "Use `/redeem CODE` to activate.",
+            "Use `/redeem CODE` to activate.\n\n"
+            "Contact an admin to get a redeem code.",
             parse_mode='Markdown'
         )
         return
@@ -774,7 +771,8 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if plan != "premium" and not is_admin:
         await query.edit_message_text(
             "❌ *PREMIUM REQUIRED*\n\n"
-            "You need a premium plan to attack.",
+            "You need a premium plan to attack.\n"
+            "Use `/redeem CODE` to activate.",
             parse_mode='Markdown'
         )
         return
@@ -887,9 +885,11 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             "👤 *MY PLAN*\n\n"
             "📊 Plan: 🆓 FREE\n"
-            "⏱️ Status: Inactive\n\n"
+            "⏱️ Status: Inactive\n"
+            "⚡ 20x UDP: ❌ DISABLED\n\n"
             "💡 *Upgrade:*\n"
-            "Use `/redeem CODE` to get premium access."
+            "Use `/redeem CODE` to get premium access.\n"
+            "Contact an admin to get a code."
         )
     else:
         if expiry:
@@ -945,7 +945,7 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🆔 ID: {user_id}\n"
         f"⭐ Level: {level.upper()}\n"
         f"📊 Plan: {plan_display}\n"
-        f"⚡ 20x UDP: ENABLED\n"
+        f"⚡ 20x UDP: {'ENABLED' if plan == 'premium' else 'DISABLED'}\n"
         f"💥 Total Attacks: {total_attacks}",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
@@ -968,11 +968,13 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = len(attack_manager.active_attacks)
     
     premium_users = sum(1 for u in users if u.get('plan') == 'premium')
+    banned_users = sum(1 for u in users if u.get('is_banned', False))
     
     stats_text = (
         f"📊 *BOT STATISTICS*\n\n"
         f"👥 Total Users: {len(users)}\n"
         f"💎 Premium Users: {premium_users}\n"
+        f"🚫 Banned Users: {banned_users}\n"
         f"👑 Admins: {len(admins)}\n"
         f"💥 Total Attacks: {total_attacks}\n"
         f"🎫 Redeem Codes: {len(codes)}\n"
@@ -1021,6 +1023,7 @@ async def admin_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("📅 7 DAYS", callback_data="gen_7d")],
         [InlineKeyboardButton("📅 30 DAYS", callback_data="gen_30d")],
         [InlineKeyboardButton("📅 90 DAYS", callback_data="gen_90d")],
+        [InlineKeyboardButton("📅 LIFETIME", callback_data="gen_lifetime")],
         [InlineKeyboardButton("🔙 BACK", callback_data="admin")]
     ]
     
@@ -1034,14 +1037,19 @@ async def process_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    days = int(query.data.split('_')[1].replace('d', ''))
+    data = query.data.split('_')[1]
+    if data == "lifetime":
+        days = 3650  # 10 years
+    else:
+        days = int(data.replace('d', ''))
+    
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
     
     if db.create_code(code, days, query.from_user.id):
         await query.edit_message_text(
             f"✅ *CODE GENERATED*\n\n"
             f"Code: `{code}`\n"
-            f"Duration: {days} days\n\n"
+            f"Duration: {'LIFETIME' if days >= 3650 else f'{days} days'}\n\n"
             f"Share this code with users!",
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
@@ -1060,7 +1068,9 @@ async def admin_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         text = "📋 *REDEEM CODES*\n\n"
         for c in codes[:20]:
             status = "✅" if not c.get('is_used') else f"❌ Used"
-            text += f"`{c['code']}` - {c['access_days']}d - {status}\n"
+            used_by = f" by {c.get('used_by')}" if c.get('used_by') else ""
+            duration = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
+            text += f"`{c['code']}` - {duration} - {status}{used_by}\n"
     
     await query.edit_message_text(
         text[:4000],
@@ -1235,15 +1245,19 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if level not in ["admin", "pseudo_owner"]:
             await update.message.reply_text("❌ Invalid role! Use: admin or pseudo_owner")
+            context.user_data['awaiting_promote'] = False
             return
         
+        # Get user info
         user = db.get_user(user_id)
         username = user.get('username', 'Unknown') if user else 'Unknown'
         
+        # Add as admin - THIS WILL GIVE THEM PREMIUM ACCESS TOO
         if db.add_admin(user_id, username, level, update.effective_user.id):
             await update.message.reply_text(
                 f"✅ *ADMIN PROMOTED!*\n\n"
-                f"User `{user_id}` is now {level.upper()}!",
+                f"User `{user_id}` is now {level.upper()}!\n"
+                f"They now have premium access automatically.",
                 parse_mode='Markdown'
             )
         else:
@@ -1303,7 +1317,11 @@ async def owner_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer()
     
     await query.edit_message_text(
-        "🚫 *BAN USER*\n\nSend user ID to ban:\n`123456789`\n\nSend /cancel to cancel",
+        "🚫 *BAN USER*\n\n"
+        "Send user ID to ban:\n`123456789`\n\n"
+        "Optional: Add reason\n"
+        "Example: `123456789 Spamming`\n\n"
+        "Send /cancel to cancel",
         parse_mode='Markdown'
     )
     context.user_data['awaiting_ban'] = True
@@ -1318,15 +1336,21 @@ async def process_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        user_id = int(update.message.text.strip())
+        parts = update.message.text.strip().split()
+        user_id = int(parts[0])
+        reason = ' '.join(parts[1:]) if len(parts) > 1 else "No reason provided"
         
         if user_id == OWNER_ID:
             await update.message.reply_text("❌ Cannot ban the main owner!")
             context.user_data['awaiting_ban'] = False
             return
         
-        db.ban_user(user_id, f"Banned by {update.effective_user.id}", update.effective_user.id)
-        await update.message.reply_text(f"✅ User `{user_id}` banned!", parse_mode='Markdown')
+        db.ban_user(user_id, reason, update.effective_user.id)
+        await update.message.reply_text(
+            f"✅ User `{user_id}` banned!\n"
+            f"Reason: {reason}",
+            parse_mode='Markdown'
+        )
     except ValueError:
         await update.message.reply_text("❌ Invalid user ID!")
     except Exception as e:
@@ -1339,13 +1363,18 @@ async def owner_unban_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     
     await query.edit_message_text(
-        "✅ *UNBAN USER*\n\nSend user ID to unban:\n`123456789`",
+        "✅ *UNBAN USER*\n\nSend user ID to unban:\n`123456789`\n\nSend /cancel to cancel",
         parse_mode='Markdown'
     )
     context.user_data['awaiting_unban'] = True
 
 async def process_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('awaiting_unban'):
+        return
+    
+    if update.message.text.lower() == '/cancel':
+        context.user_data['awaiting_unban'] = False
+        await update.message.reply_text("✅ Cancelled.")
         return
     
     try:
@@ -1386,7 +1415,8 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🎫 *REDEEM CODE*\n\n"
             "Send: `/redeem CODE`\n"
-            "Example: `/redeem ABC123XYZ`",
+            "Example: `/redeem ABC123XYZ`\n\n"
+            "💡 You can only redeem ONE code.",
             parse_mode='Markdown'
         )
         return
@@ -1418,10 +1448,10 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ *CODE REDEEMED!*\n\n"
             f"Code: `{code}`\n"
-            f"Duration: {result['access_days']} days\n"
+            f"Duration: {'LIFETIME' if result['access_days'] >= 3650 else f'{result['access_days']} days'}\n"
             f"📊 Plan: PREMIUM\n"
             f"⚡ 20x UDP: ENABLED\n"
-            f"📅 Expires: {expiry.strftime('%Y-%m-%d')}\n\n"
+            f"📅 Expires: {'Never' if result['access_days'] >= 3650 else expiry.strftime('%Y-%m-%d')}\n\n"
             f"🎉 You now have premium access!\n"
             f"Use /start to begin attacking!",
             parse_mode='Markdown'
@@ -1441,12 +1471,14 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== STATUS COMMAND =====
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
+    users = db.get_all_users()
     
     await update.message.reply_text(
         f"📊 *BOT STATUS*\n\n"
         f"⚡ Active: {stats['active']}\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
+        f"👥 Users: {len(users)}\n"
         f"🎯 Method: API-ONLY UDP\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
@@ -1462,10 +1494,12 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     is_admin = db.is_admin(user_id)
+    plan, expiry = db.get_user_plan(user_id)
     
     keyboard = []
     if not db.is_banned(user_id):
-        keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
+        if plan == "premium":
+            keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
         keyboard.append([InlineKeyboardButton("👤 MY PLAN", callback_data="my_plan")])
     
     if is_admin:
@@ -1550,7 +1584,6 @@ if __name__ == "__main__":
     print("=" * 50)
     print("👑 GURU ATTACK BOT")
     print("⚡ 20x UDP CONCURRENT")
-    print("💎 PREMIUM ONLY (Redeem Code Required)")
     print("📌 API-ONLY UDP - NO FALLBACK")
     print("📌 Live Time Updates in Bot DM")
     print("📌 Real-time Alerts to Admins")
