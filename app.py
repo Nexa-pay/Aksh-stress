@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION WITH WORKING ADMIN MANAGEMENT
+# app.py - COMPLETE FIXED VERSION WITH PSEUDO_OWNER PROTECTION
 import os
 import logging
 import asyncio
@@ -1364,10 +1364,19 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard = []
     
     for admin in admins:
-        if admin['user_id'] != OWNER_ID:
-            level = admin.get('level', 'admin')
-            user_id = admin['user_id']
-            keyboard.append([InlineKeyboardButton(f"❌ {user_id} ({level})", callback_data=f"demote_{user_id}")])
+        admin_id = admin['user_id']
+        level = admin.get('level', 'admin')
+        
+        # ===== FIX: Owner cannot demote pseudo_owner (both have same power) =====
+        # Skip if admin is pseudo_owner (they have same power as owner)
+        if level == "pseudo_owner":
+            continue
+        
+        # Skip if admin is owner
+        if admin_id == OWNER_ID:
+            continue
+        
+        keyboard.append([InlineKeyboardButton(f"❌ {admin_id} ({level})", callback_data=f"demote_{admin_id}")])
     
     keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="owner")])
     
@@ -1376,7 +1385,7 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     await query.edit_message_text(
-        "👑 *DEMOTE ADMIN*\n\nSelect admin to demote:",
+        "👑 *DEMOTE ADMIN*\n\nSelect admin to demote:\n(Note: Pseudo_Owner cannot be demoted)",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -1387,8 +1396,15 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = int(query.data.split('_')[1])
     
+    # Check if trying to demote owner
     if user_id == OWNER_ID:
         await query.edit_message_text("❌ Cannot demote the main owner!")
+        return
+    
+    # Check if trying to demote pseudo_owner (they have same power as owner)
+    admin_level = db.get_admin_level(user_id)
+    if admin_level == "pseudo_owner":
+        await query.edit_message_text("❌ Cannot demote Pseudo_Owner! They have the same power as Owner.")
         return
     
     if db.remove_admin(user_id):
@@ -1430,6 +1446,13 @@ async def process_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if user_id == OWNER_ID:
             await update.message.reply_text("❌ Cannot ban the main owner!")
+            context.user_data['awaiting_ban'] = False
+            return
+        
+        # Check if user is pseudo_owner (same power as owner)
+        admin_level = db.get_admin_level(user_id)
+        if admin_level == "pseudo_owner":
+            await update.message.reply_text("❌ Cannot ban Pseudo_Owner! They have the same power as Owner.")
             context.user_data['awaiting_ban'] = False
             return
         
@@ -1493,8 +1516,9 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
         level = admin.get('level', 'admin').upper()
         user_id = admin['user_id']
         is_owner = "⭐ " if user_id == OWNER_ID else ""
+        is_pseudo = "🔱 " if level == "PSEUDO_OWNER" else ""
         username = admin.get('username', 'Unknown')
-        text += f"{is_owner}• `{user_id}` - {level} (@{username})\n"
+        text += f"{is_owner}{is_pseudo}• `{user_id}` - {level} (@{username})\n"
     
     if not admins:
         text = "No admins found."
