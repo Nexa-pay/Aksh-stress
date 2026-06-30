@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION WITH EXTRA METHODS
+# app.py - COMPLETE FIXED VERSION WITH COOLDOWN
 import os
 import logging
 import asyncio
@@ -32,6 +32,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 MAX_CONCURRENT = 20
+ATTACK_COOLDOWN = 60  # Cooldown in seconds
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -92,7 +93,8 @@ class Database:
                     "is_banned": False,
                     "ban_reason": None,
                     "banned_by": None,
-                    "banned_at": None
+                    "banned_at": None,
+                    "last_attack_time": None  # Track last attack time for cooldown
                 }},
                 upsert=True
             )
@@ -106,7 +108,8 @@ class Database:
                     "plan": "free",
                     "plan_expiry": None,
                     "has_used_code": False,
-                    "is_banned": False
+                    "is_banned": False,
+                    "last_attack_time": None
                 }
                 return True
             return False
@@ -250,6 +253,27 @@ class Database:
         user = self.get_user(user_id)
         return user.get("is_banned", False) if user else False
     
+    def get_last_attack_time(self, user_id):
+        user = self.get_user(user_id)
+        if user:
+            last_attack = user.get("last_attack_time")
+            if last_attack and isinstance(last_attack, str):
+                try:
+                    return datetime.fromisoformat(last_attack)
+                except:
+                    return None
+            return last_attack
+        return None
+    
+    def update_last_attack_time(self, user_id):
+        if not self.memory_mode:
+            self.users.update_one(
+                {"user_id": user_id},
+                {"$set": {"last_attack_time": datetime.now().isoformat()}}
+            )
+        elif user_id in self.users:
+            self.users[user_id]["last_attack_time"] = datetime.now()
+    
     def create_code(self, code, days, created_by):
         if not self.memory_mode:
             if self.codes.find_one({"code": code}):
@@ -347,6 +371,9 @@ class Database:
         else:
             self.logs.append(log)
         
+        # Update last attack time for cooldown
+        self.update_last_attack_time(user_id)
+        
         user = self.get_user(user_id)
         username = user.get("username") if user else None
         first_name = user.get("first_name") if user else None
@@ -401,6 +428,21 @@ class AttackManager:
             # Check if any attack is already running globally
             if self.global_attack_running:
                 return False, f"❌ Another attack is already running!\nPlease wait for it to finish."
+            
+            # Check user's cooldown
+            last_attack = db.get_last_attack_time(user_id)
+            if last_attack:
+                if isinstance(last_attack, str):
+                    try:
+                        last_attack = datetime.fromisoformat(last_attack)
+                    except:
+                        last_attack = None
+                
+                if last_attack and isinstance(last_attack, datetime):
+                    elapsed = (datetime.now() - last_attack).total_seconds()
+                    if elapsed < ATTACK_COOLDOWN:
+                        remaining = int(ATTACK_COOLDOWN - elapsed)
+                        return False, f"⏳ Please wait {remaining} seconds before next attack!"
             
             user_attacks = sum(1 for a in self.active_attacks.values() if a['user_id'] == user_id)
             if user_attacks >= MAX_CONCURRENT:
@@ -464,7 +506,8 @@ class AttackManager:
                 'concurrent_busy': self.concurrent_busy,
                 'total': self.total_attacks,
                 'max': MAX_CONCURRENT,
-                'is_running': self.global_attack_running
+                'is_running': self.global_attack_running,
+                'cooldown': ATTACK_COOLDOWN
             }
     
     def cleanup(self):
@@ -719,13 +762,28 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if stats['is_running']:
         attack_status = f"\n⚠️ *Attack in progress!*\nPlease wait..."
     
+    # Check cooldown
+    cooldown_status = ""
+    last_attack = db.get_last_attack_time(user_id)
+    if last_attack:
+        if isinstance(last_attack, str):
+            try:
+                last_attack = datetime.fromisoformat(last_attack)
+            except:
+                last_attack = None
+        if last_attack and isinstance(last_attack, datetime):
+            elapsed = (datetime.now() - last_attack).total_seconds()
+            if elapsed < ATTACK_COOLDOWN:
+                remaining = int(ATTACK_COOLDOWN - elapsed)
+                cooldown_status = f"\n⏳ *Cooldown:* {remaining}s remaining"
+    
     welcome_msg = (
         f"👋 *WELCOME TO GURU*\n\n"
         f"Hello {first_name}! 👋\n"
         f"📊 Total Attacks: {total_attacks}\n"
         f"📊 Plan: {plan_display}\n"
         f"⚡ 20x UDP Concurrent: {'✅ ENABLED' if plan == 'premium' else '❌ PREMIUM ONLY'}\n"
-        f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}{attack_status}\n\n"
+        f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}{attack_status}{cooldown_status}\n\n"
         f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack to start attacking!'}"
     )
     
@@ -804,7 +862,8 @@ async def extra_methods_callback(update: Update, context: ContextTypes.DEFAULT_T
         "Select a method:\n"
         "• UDPBIG - Large UDP packet flood\n"
         "• TELEGRAM - Telegram protocol attack\n\n"
-        "⚡ All methods use 20 concurrent attacks!",
+        "⚡ All methods use 20 concurrent attacks!\n"
+        f"⏳ Cooldown: {ATTACK_COOLDOWN}s between attacks",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -854,6 +913,7 @@ async def method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📡 Method: `{method.upper()}`\n"
         "⚡ 20 concurrent attacks!\n"
         "⏱️ Time: 60-300 seconds\n"
+        f"⏳ Cooldown: {ATTACK_COOLDOWN}s after attack\n"
         "Send /cancel to cancel",
         parse_mode='Markdown'
     )
@@ -893,13 +953,34 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ You are banned!")
         return
     
+    # Check cooldown
+    last_attack = db.get_last_attack_time(user_id)
+    if last_attack:
+        if isinstance(last_attack, str):
+            try:
+                last_attack = datetime.fromisoformat(last_attack)
+            except:
+                last_attack = None
+        if last_attack and isinstance(last_attack, datetime):
+            elapsed = (datetime.now() - last_attack).total_seconds()
+            if elapsed < ATTACK_COOLDOWN:
+                remaining = int(ATTACK_COOLDOWN - elapsed)
+                await update.message.reply_text(
+                    f"⏳ *COOLDOWN ACTIVE*\n\n"
+                    f"Please wait {remaining} seconds before your next attack!\n"
+                    f"Cooldown: {ATTACK_COOLDOWN}s",
+                    parse_mode='Markdown'
+                )
+                return
+    
     args = context.args
     if len(args) < 3:
         await update.message.reply_text(
             "❌ *Usage:* `/attack IP PORT TIME`\n\n"
             "Example: `/attack 91.108.17.41 32001 60`\n\n"
             "⚡ 20 concurrent UDP attacks!\n"
-            "⏱️ Time: 60-300 seconds\n\n"
+            "⏱️ Time: 60-300 seconds\n"
+            f"⏳ Cooldown: {ATTACK_COOLDOWN}s after attack\n\n"
             "📡 Extra methods: Click 'EXTRA METHODS' button",
             parse_mode='Markdown'
         )
@@ -977,6 +1058,26 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ You are banned!")
         return
     
+    # Check cooldown
+    last_attack = db.get_last_attack_time(user_id)
+    if last_attack:
+        if isinstance(last_attack, str):
+            try:
+                last_attack = datetime.fromisoformat(last_attack)
+            except:
+                last_attack = None
+        if last_attack and isinstance(last_attack, datetime):
+            elapsed = (datetime.now() - last_attack).total_seconds()
+            if elapsed < ATTACK_COOLDOWN:
+                remaining = int(ATTACK_COOLDOWN - elapsed)
+                await query.edit_message_text(
+                    f"⏳ *COOLDOWN ACTIVE*\n\n"
+                    f"Please wait {remaining} seconds before your next attack!\n"
+                    f"Cooldown: {ATTACK_COOLDOWN}s",
+                    parse_mode='Markdown'
+                )
+                return
+    
     # Check if attack is already running
     can_start, msg = attack_manager.can_start_attack(user_id)
     if not can_start:
@@ -984,12 +1085,13 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await query.edit_message_text(
-        "💥 *ATTACK (UDP)*\n\n"
+        f"💥 *ATTACK (UDP)*\n\n"
         "Send: `IP PORT TIME`\n"
         "Example: `91.108.17.41 32001 60`\n\n"
         "📡 Method: `UDP`\n"
         "⚡ 20 concurrent UDP attacks!\n"
         "⏱️ Time: 60-300 seconds\n"
+        f"⏳ Cooldown: {ATTACK_COOLDOWN}s after attack\n"
         "Send /cancel to cancel\n\n"
         "📡 For other methods, click 'EXTRA METHODS'",
         parse_mode='Markdown'
@@ -1067,6 +1169,13 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         attack_manager.stop_attack(attack_id)
         attack_manager.cleanup()
         
+        # Show cooldown message
+        await update.message.reply_text(
+            f"✅ *Attack Complete!*\n\n"
+            f"⏳ Next attack available in {ATTACK_COOLDOWN} seconds.",
+            parse_mode='Markdown'
+        )
+        
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
     
@@ -1104,6 +1213,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• Full access\n"
                 "• 20x UDP Concurrent\n"
                 "• UDP, UDPBIG, TELEGRAM methods\n"
+                f"• {ATTACK_COOLDOWN}s cooldown between attacks\n"
                 "• Unlimited attacks"
             )
         else:
@@ -1115,6 +1225,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "• Full access\n"
                 "• 20x UDP Concurrent\n"
                 "• UDP, UDPBIG, TELEGRAM methods\n"
+                f"• {ATTACK_COOLDOWN}s cooldown between attacks\n"
                 "• Unlimited attacks"
             )
     
@@ -1143,13 +1254,30 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             plan_display = "PREMIUM (Lifetime)"
     
+    # Get cooldown info
+    cooldown_info = ""
+    last_attack = db.get_last_attack_time(user_id)
+    if last_attack:
+        if isinstance(last_attack, str):
+            try:
+                last_attack = datetime.fromisoformat(last_attack)
+            except:
+                last_attack = None
+        if last_attack and isinstance(last_attack, datetime):
+            elapsed = (datetime.now() - last_attack).total_seconds()
+            if elapsed < ATTACK_COOLDOWN:
+                remaining = int(ATTACK_COOLDOWN - elapsed)
+                cooldown_info = f"\n⏳ Cooldown: {remaining}s remaining"
+            else:
+                cooldown_info = f"\n✅ Cooldown: Ready"
+    
     await query.edit_message_text(
         f"👤 *USER INFO*\n\n"
         f"🆔 ID: {user_id}\n"
         f"⭐ Level: {level.upper()}\n"
         f"📊 Plan: {plan_display}\n"
         f"⚡ 20x UDP: {'✅ ENABLED' if plan == 'premium' else '❌ DISABLED'}\n"
-        f"💥 Total Attacks: {total_attacks}",
+        f"💥 Total Attacks: {total_attacks}{cooldown_info}",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
@@ -1185,6 +1313,7 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎫 Redeem Codes: {len(codes)}\n"
         f"⚡ Active Attacks: {stats['active']}/{stats['max']}\n"
         f"⚡ Attack Status: {attack_status}\n"
+        f"⏳ Cooldown: {ATTACK_COOLDOWN}s\n"
         f"⚡ 20x UDP: ENABLED\n"
         f"🌐 Status: ONLINE"
     )
@@ -1766,6 +1895,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📈 Total Attacks: {stats['total']}\n"
         f"👥 Users: {len(users)}\n"
         f"⚡ Attack Status: {attack_status}\n"
+        f"⏳ Cooldown: {ATTACK_COOLDOWN}s\n"
         f"🎯 Methods: UDP, UDPBIG, TELEGRAM\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
@@ -1896,6 +2026,7 @@ if __name__ == "__main__":
     print("📡 METHODS: UDP, UDPBIG, TELEGRAM")
     print("📌 API-ONLY - NO FALLBACK")
     print("📌 One attack at a time")
+    print(f"⏳ Cooldown: {ATTACK_COOLDOWN}s between attacks")
     print("📌 Live Time Updates in Bot DM")
     print("📌 Real-time Alerts to Admins")
     print("=" * 50)
