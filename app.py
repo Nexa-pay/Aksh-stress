@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION
+# app.py - COMPLETE FIXED VERSION WITH MENU BUTTONS
 import os
 import logging
 import asyncio
@@ -9,7 +9,7 @@ import random
 import string
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import (
     Application, 
     CommandHandler, 
@@ -123,14 +123,12 @@ class Database:
         plan = user.get("plan", "free")
         expiry = user.get("plan_expiry")
         
-        # Handle string expiry
         if expiry and isinstance(expiry, str):
             try:
                 expiry = datetime.fromisoformat(expiry)
             except:
                 expiry = None
         
-        # Check if expired
         if expiry and isinstance(expiry, datetime):
             if expiry < datetime.now():
                 plan = "free"
@@ -636,19 +634,87 @@ async def update_timer(status_msg, duration, target, port):
     except Exception as e:
         logger.error(f"Timer update error: {e}")
 
+# ===== KEYBOARD MENUS =====
+def get_main_menu(user_id):
+    """Get the main menu keyboard"""
+    is_admin = db.is_admin(user_id)
+    is_owner = db.is_owner_or_pseudo(user_id)
+    is_banned = db.is_banned(user_id)
+    plan, expiry = db.get_user_plan(user_id)
+    is_premium = plan == "premium"
+    
+    keyboard = []
+    
+    # Row 1: Attack (only for premium or admin)
+    if not is_banned and (is_premium or is_admin):
+        keyboard.append([KeyboardButton("💥 ATTACK")])
+    
+    # Row 2: My Plan and My Info
+    row2 = []
+    row2.append(KeyboardButton("👤 MY PLAN"))
+    if not is_admin:
+        row2.append(KeyboardButton("👤 MY INFO"))
+    keyboard.append(row2)
+    
+    # Row 3: Admin/Stats buttons
+    row3 = []
+    if is_admin:
+        row3.append(KeyboardButton("📊 STATS"))
+        row3.append(KeyboardButton("⚙️ ADMIN"))
+    keyboard.append(row3) if row3 else None
+    
+    # Row 4: Owner buttons
+    row4 = []
+    if is_owner:
+        row4.append(KeyboardButton("👑 OWNER"))
+    keyboard.append(row4) if row4 else None
+    
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_admin_menu():
+    """Admin menu keyboard"""
+    keyboard = [
+        [KeyboardButton("➕ GENERATE CODE")],
+        [KeyboardButton("📋 LIST CODES")],
+        [KeyboardButton("🗑️ DELETE CODE")],
+        [KeyboardButton("📊 STATS")],
+        [KeyboardButton("🔙 BACK")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_owner_menu():
+    """Owner menu keyboard"""
+    keyboard = [
+        [KeyboardButton("🛑 KILL SWITCH")],
+        [KeyboardButton("👑 PROMOTE ADMIN")],
+        [KeyboardButton("👑 DEMOTE ADMIN")],
+        [KeyboardButton("🚫 BAN USER")],
+        [KeyboardButton("✅ UNBAN USER")],
+        [KeyboardButton("📋 LIST ADMINS")],
+        [KeyboardButton("📋 LIST USERS")],
+        [KeyboardButton("🚫 BANNED USERS")],
+        [KeyboardButton("📊 STATS")],
+        [KeyboardButton("🔙 BACK")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 # ===== BOT HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
+    # Clear any user data
+    context.user_data.clear()
+    
+    # Add user to database
     db.add_user(user_id, user.username, user.first_name)
     
+    # Check if user has premium
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
     
     logger.info(f"User {user_id} - Plan: {plan}, Expiry: {expiry}, Is Admin: {is_admin}")
     
-    stats = attack_manager.get_stats()
     total_attacks = db.get_user_stats(user_id)
     
     if plan == "premium":
@@ -668,28 +734,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Plan: {plan_display}\n"
         f"⚡ 20x UDP Concurrent: {'✅ ENABLED' if plan == 'premium' else '❌ PREMIUM ONLY'}\n"
         f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}\n\n"
-        f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack to start attacking!'}"
+        f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Click ATTACK to start attacking!'}"
     )
-    
-    keyboard = []
-    if not db.is_banned(user_id):
-        if plan == "premium" or is_admin:
-            keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
-        keyboard.append([InlineKeyboardButton("👤 MY PLAN", callback_data="my_plan")])
-    
-    if is_admin:
-        keyboard.append([InlineKeyboardButton("📊 STATS", callback_data="stats")])
-        keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
-    
-    if db.is_owner_or_pseudo(user_id):
-        keyboard.append([InlineKeyboardButton("👑 OWNER", callback_data="owner")])
-    
-    if not is_admin:
-        keyboard.append([InlineKeyboardButton("👤 MY INFO", callback_data="info")])
     
     await update.message.reply_text(
         welcome_msg,
-        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
+        reply_markup=get_main_menu(user_id),
         parse_mode='Markdown'
     )
 
@@ -700,15 +750,14 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
     
-    logger.info(f"Attack check - User: {user_id}, Plan: {plan}, Is Admin: {is_admin}, Expiry: {expiry}")
-    
     if plan != "premium" and not is_admin:
         await update.message.reply_text(
             "❌ *PREMIUM REQUIRED*\n\n"
             "You need a premium plan to attack.\n"
             "Use `/redeem CODE` to activate.\n\n"
             "Contact an admin to get a redeem code.",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=get_main_menu(user_id)
         )
         return
     
@@ -717,12 +766,16 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ *PLAN EXPIRED*\n\n"
             "Your premium plan has expired.\n"
             "Please redeem a new code.",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=get_main_menu(user_id)
         )
         return
     
     if db.is_banned(user_id):
-        await update.message.reply_text("❌ You are banned!")
+        await update.message.reply_text(
+            "❌ You are banned!",
+            reply_markup=get_main_menu(user_id)
+        )
         return
     
     args = context.args
@@ -732,7 +785,8 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Example: `/attack 91.108.17.41 32001 60`\n\n"
             "⚡ 20 concurrent UDP attacks!\n"
             "⏱️ Time: 60-300 seconds",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=get_main_menu(user_id)
         )
         return
     
@@ -742,15 +796,15 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         duration = int(args[2])
         
         if duration < 60:
-            await update.message.reply_text("❌ Minimum duration is 60 seconds!")
+            await update.message.reply_text("❌ Minimum duration is 60 seconds!", reply_markup=get_main_menu(user_id))
             return
         if duration > 300:
-            await update.message.reply_text("❌ Maximum duration is 300 seconds!")
+            await update.message.reply_text("❌ Maximum duration is 300 seconds!", reply_markup=get_main_menu(user_id))
             return
         
         can_start, msg = attack_manager.can_start_attack(user_id)
         if not can_start:
-            await update.message.reply_text(msg)
+            await update.message.reply_text(msg, reply_markup=get_main_menu(user_id))
             return
         
         attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
@@ -768,89 +822,541 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         attack_manager.stop_attack(attack_id)
         attack_manager.cleanup()
         
+        # Show menu again after attack
+        await update.message.reply_text(
+            "✅ Attack completed!",
+            reply_markup=get_main_menu(user_id)
+        )
+        
     except ValueError as e:
-        await update.message.reply_text(f"❌ Invalid port or time! Use numbers.\nError: {e}")
+        await update.message.reply_text(
+            f"❌ Invalid port or time! Use numbers.\nError: {e}",
+            reply_markup=get_main_menu(user_id)
+        )
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text(
+            f"❌ Error: {str(e)}",
+            reply_markup=get_main_menu(user_id)
+        )
 
-# ===== BUTTON ATTACK =====
-async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+# ===== BUTTON HANDLERS =====
+async def handle_menu_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle menu button presses"""
+    user_id = update.effective_user.id
+    text = update.message.text
     
-    user_id = query.from_user.id
+    logger.info(f"Menu button pressed: {text} by user {user_id}")
     
-    plan, expiry = db.get_user_plan(user_id)
-    is_admin = db.is_admin(user_id)
-    
-    if plan != "premium" and not is_admin:
-        await query.edit_message_text(
-            "❌ *PREMIUM REQUIRED*\n\n"
-            "You need a premium plan to attack.\n"
-            "Use `/redeem CODE` to activate.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    if plan == "premium" and expiry and expiry < datetime.now():
-        await query.edit_message_text(
-            "❌ *PLAN EXPIRED*\n\n"
-            "Your premium plan has expired.",
-            parse_mode='Markdown'
-        )
-        return
-    
+    # Check if user is banned
     if db.is_banned(user_id):
-        await query.edit_message_text("❌ You are banned!")
+        await update.message.reply_text("❌ You are banned!", reply_markup=get_main_menu(user_id))
         return
     
-    await query.edit_message_text(
-        "💥 *ATTACK*\n\n"
-        "Send: `IP PORT TIME`\n"
-        "Example: `91.108.17.41 32001 60`\n\n"
-        "⚡ 20 concurrent UDP attacks!\n"
-        "⏱️ Time: 60-300 seconds\n"
-        "Send /cancel to cancel",
-        parse_mode='Markdown'
-    )
-    context.user_data['awaiting_attack'] = True
+    # ===== MAIN MENU BUTTONS =====
+    if text == "💥 ATTACK":
+        plan, expiry = db.get_user_plan(user_id)
+        is_admin = db.is_admin(user_id)
+        
+        if plan != "premium" and not is_admin:
+            await update.message.reply_text(
+                "❌ *PREMIUM REQUIRED*\n\n"
+                "You need a premium plan to attack.\n"
+                "Use `/redeem CODE` to activate.",
+                parse_mode='Markdown',
+                reply_markup=get_main_menu(user_id)
+            )
+            return
+        
+        if plan == "premium" and expiry and expiry < datetime.now():
+            await update.message.reply_text(
+                "❌ *PLAN EXPIRED*\n\n"
+                "Your premium plan has expired.\n"
+                "Please redeem a new code.",
+                parse_mode='Markdown',
+                reply_markup=get_main_menu(user_id)
+            )
+            return
+        
+        await update.message.reply_text(
+            "💥 *ATTACK*\n\n"
+            "Send: `IP PORT TIME`\n"
+            "Example: `91.108.17.41 32001 60`\n\n"
+            "⚡ 20 concurrent UDP attacks!\n"
+            "⏱️ Time: 60-300 seconds\n"
+            "Send /cancel to cancel",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu(user_id)
+        )
+        context.user_data['awaiting_attack'] = True
+    
+    elif text == "👤 MY PLAN":
+        plan, expiry = db.get_user_plan(user_id)
+        
+        if plan == "free":
+            msg = (
+                "👤 *MY PLAN*\n\n"
+                "📊 Plan: 🆓 FREE\n"
+                "⏱️ Status: Inactive\n"
+                "⚡ 20x UDP: ❌ DISABLED\n\n"
+                "💡 *Upgrade:*\n"
+                "Use `/redeem CODE` to get premium access.\n"
+                "Contact an admin to get a code."
+            )
+        else:
+            if expiry:
+                days_left = max(0, (expiry - datetime.now()).days)
+                msg = (
+                    "👤 *MY PLAN*\n\n"
+                    "📊 Plan: 💎 PREMIUM\n"
+                    f"⏱️ Remaining: {days_left} days\n"
+                    f"📅 Expires: {expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
+                    "📌 Features:\n"
+                    "• Full access\n"
+                    "• 20x UDP Concurrent\n"
+                    "• Unlimited attacks"
+                )
+            else:
+                msg = (
+                    "👤 *MY PLAN*\n\n"
+                    "📊 Plan: 💎 PREMIUM\n"
+                    "⏱️ Status: LIFETIME\n\n"
+                    "📌 Features:\n"
+                    "• Full access\n"
+                    "• 20x UDP Concurrent\n"
+                    "• Unlimited attacks"
+                )
+        
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=get_main_menu(user_id))
+    
+    elif text == "👤 MY INFO":
+        level = db.get_admin_level(user_id) or "USER"
+        plan, expiry = db.get_user_plan(user_id)
+        total_attacks = db.get_user_stats(user_id)
+        
+        if plan == "free":
+            plan_display = "FREE"
+        else:
+            if expiry:
+                days_left = max(0, (expiry - datetime.now()).days)
+                plan_display = f"PREMIUM ({days_left}d left)"
+            else:
+                plan_display = "PREMIUM (Lifetime)"
+        
+        msg = (
+            f"👤 *USER INFO*\n\n"
+            f"🆔 ID: {user_id}\n"
+            f"⭐ Level: {level.upper()}\n"
+            f"📊 Plan: {plan_display}\n"
+            f"⚡ 20x UDP: {'✅ ENABLED' if plan == 'premium' else '❌ DISABLED'}\n"
+            f"💥 Total Attacks: {total_attacks}"
+        )
+        
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=get_main_menu(user_id))
+    
+    elif text == "📊 STATS":
+        if not db.is_admin(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        total_attacks = db.get_total_attacks()
+        users = db.get_all_users()
+        admins = db.get_admins()
+        codes = db.get_codes()
+        active = len(attack_manager.active_attacks)
+        
+        premium_users = sum(1 for u in users if u.get('plan') == 'premium')
+        banned_users = sum(1 for u in users if u.get('is_banned', False))
+        
+        msg = (
+            f"📊 *BOT STATISTICS*\n\n"
+            f"👥 Total Users: {len(users)}\n"
+            f"💎 Premium Users: {premium_users}\n"
+            f"🚫 Banned Users: {banned_users}\n"
+            f"👑 Admins: {len(admins)}\n"
+            f"💥 Total Attacks: {total_attacks}\n"
+            f"🎫 Redeem Codes: {len(codes)}\n"
+            f"⚡ Active Attacks: {active}/{MAX_CONCURRENT}\n"
+            f"⚡ 20x UDP: ENABLED\n"
+            f"🌐 Status: ONLINE"
+        )
+        
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=get_main_menu(user_id))
+    
+    # ===== ADMIN MENU BUTTONS =====
+    elif text == "⚙️ ADMIN":
+        if not db.is_admin(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        await update.message.reply_text(
+            "⚙️ *ADMIN PANEL*\n\nSelect action:",
+            parse_mode='Markdown',
+            reply_markup=get_admin_menu()
+        )
+    
+    elif text == "➕ GENERATE CODE":
+        if not db.is_admin(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        keyboard = [
+            [KeyboardButton("📅 1 DAY"), KeyboardButton("📅 3 DAYS")],
+            [KeyboardButton("📅 7 DAYS"), KeyboardButton("📅 30 DAYS")],
+            [KeyboardButton("📅 90 DAYS"), KeyboardButton("📅 LIFETIME")],
+            [KeyboardButton("🔙 BACK")]
+        ]
+        
+        await update.message.reply_text(
+            "➕ *GENERATE CODE*\n\nSelect duration:",
+            parse_mode='Markdown',
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        context.user_data['awaiting_code_gen'] = True
+    
+    elif text == "📋 LIST CODES":
+        if not db.is_admin(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        codes = db.get_codes()
+        if not codes:
+            msg = "📋 No codes generated yet."
+        else:
+            msg = "📋 *REDEEM CODES*\n\n"
+            for c in codes[:20]:
+                status = "✅" if not c.get('is_used') else f"❌ Used"
+                used_by = f" by {c.get('used_by')}" if c.get('used_by') else ""
+                duration = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
+                msg += f"`{c['code']}` - {duration} - {status}{used_by}\n"
+        
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=get_admin_menu())
+    
+    elif text == "🗑️ DELETE CODE":
+        if not db.is_admin(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        codes = db.get_codes(only_unused=True)
+        if not codes:
+            await update.message.reply_text("No unused codes to delete!", reply_markup=get_admin_menu())
+            return
+        
+        keyboard = []
+        for c in codes[:10]:
+            keyboard.append([KeyboardButton(f"❌ {c['code']}")])
+        keyboard.append([KeyboardButton("🔙 BACK")])
+        
+        await update.message.reply_text(
+            "🗑️ *DELETE CODE*\n\nClick a code to delete:",
+            parse_mode='Markdown',
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        context.user_data['awaiting_code_delete'] = True
+    
+    # ===== OWNER MENU BUTTONS =====
+    elif text == "👑 OWNER":
+        if not db.is_owner_or_pseudo(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        await update.message.reply_text(
+            f"👑 *OWNER PANEL*\n\nSelect action:",
+            parse_mode='Markdown',
+            reply_markup=get_owner_menu()
+        )
+    
+    elif text == "🛑 KILL SWITCH":
+        if not db.is_owner_or_pseudo(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        attack_manager.stop_all_attacks()
+        await update.message.reply_text(
+            f"🛑 *KILL SWITCH ACTIVATED*\n\n✅ All active attacks stopped\n⚡ System cleared!",
+            parse_mode='Markdown',
+            reply_markup=get_owner_menu()
+        )
+    
+    elif text == "👑 PROMOTE ADMIN":
+        if not db.is_owner_or_pseudo(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        await update.message.reply_text(
+            "👑 *PROMOTE ADMIN*\n\n"
+            "Send: `USER_ID ROLE`\n"
+            "Example: `123456789 pseudo_owner`\n\n"
+            "Roles: admin, pseudo_owner\n"
+            "Send /cancel to cancel",
+            parse_mode='Markdown',
+            reply_markup=get_owner_menu()
+        )
+        context.user_data['awaiting_promote'] = True
+    
+    elif text == "👑 DEMOTE ADMIN":
+        if not db.is_owner_or_pseudo(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        admins = db.get_admins()
+        keyboard = []
+        for admin in admins:
+            if admin['user_id'] != OWNER_ID:
+                level = admin.get('level', 'admin')
+                keyboard.append([KeyboardButton(f"❌ {admin['user_id']} ({level})")])
+        keyboard.append([KeyboardButton("🔙 BACK")])
+        
+        if not keyboard:
+            await update.message.reply_text("No admins to demote!", reply_markup=get_owner_menu())
+            return
+        
+        await update.message.reply_text(
+            "👑 *DEMOTE ADMIN*\n\nClick an admin to demote:",
+            parse_mode='Markdown',
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        context.user_data['awaiting_demote'] = True
+    
+    elif text == "🚫 BAN USER":
+        if not db.is_owner_or_pseudo(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        await update.message.reply_text(
+            "🚫 *BAN USER*\n\n"
+            "Send: `USER_ID REASON`\n"
+            "Example: `123456789 Spamming`\n\n"
+            "Send /cancel to cancel",
+            parse_mode='Markdown',
+            reply_markup=get_owner_menu()
+        )
+        context.user_data['awaiting_ban'] = True
+    
+    elif text == "✅ UNBAN USER":
+        if not db.is_owner_or_pseudo(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        await update.message.reply_text(
+            "✅ *UNBAN USER*\n\n"
+            "Send: `USER_ID`\n"
+            "Example: `123456789`\n\n"
+            "Send /cancel to cancel",
+            parse_mode='Markdown',
+            reply_markup=get_owner_menu()
+        )
+        context.user_data['awaiting_unban'] = True
+    
+    elif text == "📋 LIST ADMINS":
+        if not db.is_owner_or_pseudo(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        admins = db.get_admins()
+        msg = "👑 *ADMIN LIST*\n\n"
+        for admin in admins:
+            level = admin.get('level', 'admin').upper()
+            admin_id = admin['user_id']
+            is_owner = "⭐ " if admin_id == OWNER_ID else ""
+            username = admin.get('username', 'Unknown')
+            msg += f"{is_owner}• `{admin_id}` - {level} (@{username})\n"
+        
+        if not admins:
+            msg = "No admins found."
+        
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=get_owner_menu())
+    
+    elif text == "📋 LIST USERS":
+        if not db.is_owner_or_pseudo(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        users = db.get_all_users()
+        
+        if not users:
+            await update.message.reply_text("📋 No users found.", reply_markup=get_owner_menu())
+            return
+        
+        msg = "👥 *ALL USERS*\n\n"
+        for user in users[:50]:
+            user_id2 = user.get('user_id')
+            username = user.get('username', 'N/A')
+            plan = user.get('plan', 'free').upper()
+            expiry = user.get('plan_expiry')
+            
+            if expiry:
+                if isinstance(expiry, str):
+                    try:
+                        expiry = datetime.fromisoformat(expiry)
+                    except:
+                        expiry = None
+                if expiry and isinstance(expiry, datetime):
+                    days_left = max(0, (expiry - datetime.now()).days)
+                    expiry_text = f"{days_left}d left"
+                else:
+                    expiry_text = "Expired"
+            else:
+                expiry_text = "Lifetime" if plan == "PREMIUM" else "No plan"
+            
+            is_banned = "🚫" if user.get('is_banned') else "✅"
+            is_admin2 = "⭐" if db.is_admin(user_id2) else ""
+            msg += f"{is_banned} {is_admin2} `{user_id2}` - @{username}\n"
+            msg += f"   📊 {plan} | ⏱️ {expiry_text}\n\n"
+        
+        if len(users) > 50:
+            msg += f"... and {len(users) - 50} more users"
+        
+        await update.message.reply_text(msg[:4000], parse_mode='Markdown', reply_markup=get_owner_menu())
+    
+    elif text == "🚫 BANNED USERS":
+        if not db.is_owner_or_pseudo(user_id):
+            await update.message.reply_text("❌ Access denied!", reply_markup=get_main_menu(user_id))
+            return
+        
+        banned = db.get_banned_users()
+        if not banned:
+            await update.message.reply_text("🚫 No banned users.", reply_markup=get_owner_menu())
+            return
+        
+        msg = "🚫 *BANNED USERS*\n\n"
+        for user in banned[:20]:
+            user_id2 = user.get('user_id')
+            username = user.get('username', 'N/A')
+            reason = user.get('ban_reason', 'No reason')
+            banned_at = user.get('banned_at')
+            banned_at_str = banned_at.strftime('%Y-%m-%d') if banned_at else 'N/A'
+            msg += f"• `{user_id2}` - @{username}\n"
+            msg += f"  Reason: {reason}\n"
+            msg += f"  Banned: {banned_at_str}\n\n"
+        
+        await update.message.reply_text(msg, parse_mode='Markdown', reply_markup=get_owner_menu())
+    
+    # ===== BACK BUTTON =====
+    elif text == "🔙 BACK":
+        await update.message.reply_text(
+            "👋 *WELCOME BACK*",
+            parse_mode='Markdown',
+            reply_markup=get_main_menu(user_id)
+        )
+        context.user_data.clear()
+    
+    else:
+        # Check if we're waiting for input
+        if context.user_data.get('awaiting_code_gen'):
+            await process_code_gen(update, context)
+        elif context.user_data.get('awaiting_code_delete'):
+            await process_code_delete(update, context)
+        elif context.user_data.get('awaiting_promote'):
+            await process_promote(update, context)
+        elif context.user_data.get('awaiting_demote'):
+            await process_demote(update, context)
+        elif context.user_data.get('awaiting_ban'):
+            await process_ban(update, context)
+        elif context.user_data.get('awaiting_unban'):
+            await process_unban(update, context)
+        elif context.user_data.get('awaiting_attack'):
+            await process_attack(update, context)
+        else:
+            # Unknown command - show main menu
+            await update.message.reply_text(
+                "Please use the menu buttons below:",
+                reply_markup=get_main_menu(user_id)
+            )
+
+# ===== PROCESS FUNCTIONS =====
+async def process_code_gen(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process code generation"""
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    if text == "🔙 BACK":
+        context.user_data.pop('awaiting_code_gen', None)
+        await update.message.reply_text("Back to admin panel.", reply_markup=get_admin_menu())
+        return
+    
+    duration_map = {
+        "📅 1 DAY": 1,
+        "📅 3 DAYS": 3,
+        "📅 7 DAYS": 7,
+        "📅 30 DAYS": 30,
+        "📅 90 DAYS": 90,
+        "📅 LIFETIME": 3650
+    }
+    
+    if text in duration_map:
+        days = duration_map[text]
+        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
+        
+        if db.create_code(code, days, user_id):
+            await update.message.reply_text(
+                f"✅ *CODE GENERATED*\n\n"
+                f"Code: `{code}`\n"
+                f"Duration: {'LIFETIME' if days >= 3650 else f'{days} days'}\n\n"
+                f"Share this code with users!",
+                parse_mode='Markdown',
+                reply_markup=get_admin_menu()
+            )
+        else:
+            await update.message.reply_text("❌ Failed to generate code!", reply_markup=get_admin_menu())
+        
+        context.user_data.pop('awaiting_code_gen', None)
+
+async def process_code_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process code deletion"""
+    text = update.message.text
+    
+    if text == "🔙 BACK":
+        context.user_data.pop('awaiting_code_delete', None)
+        await update.message.reply_text("Back to admin panel.", reply_markup=get_admin_menu())
+        return
+    
+    if text.startswith("❌ "):
+        code = text.replace("❌ ", "").strip()
+        if db.delete_code(code):
+            await update.message.reply_text(f"✅ Code `{code}` deleted!", parse_mode='Markdown', reply_markup=get_admin_menu())
+        else:
+            await update.message.reply_text("❌ Failed to delete code!", reply_markup=get_admin_menu())
+        context.user_data.pop('awaiting_code_delete', None)
 
 async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process attack input"""
     if not context.user_data.get('awaiting_attack'):
         return
     
-    if update.message.text.lower() == '/cancel':
-        context.user_data['awaiting_attack'] = False
-        await update.message.reply_text("✅ Cancelled.")
-        return
-    
     user_id = update.effective_user.id
+    text = update.message.text
+    
+    if text.lower() == '/cancel':
+        context.user_data['awaiting_attack'] = False
+        await update.message.reply_text("✅ Cancelled.", reply_markup=get_main_menu(user_id))
+        return
     
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
     
     if plan != "premium" and not is_admin:
-        await update.message.reply_text("❌ Premium required!")
+        await update.message.reply_text("❌ Premium required!", reply_markup=get_main_menu(user_id))
         context.user_data['awaiting_attack'] = False
         return
     
     if plan == "premium" and expiry and expiry < datetime.now():
-        await update.message.reply_text("❌ Plan expired!")
+        await update.message.reply_text("❌ Plan expired!", reply_markup=get_main_menu(user_id))
         context.user_data['awaiting_attack'] = False
         return
     
     if db.is_banned(user_id):
-        await update.message.reply_text("❌ You are banned!")
+        await update.message.reply_text("❌ You are banned!", reply_markup=get_main_menu(user_id))
         context.user_data['awaiting_attack'] = False
         return
     
     try:
-        parts = update.message.text.split()
+        parts = text.split()
         if len(parts) < 3:
             await update.message.reply_text(
                 "❌ Use: `IP PORT TIME`\n"
                 "Example: `91.108.17.41 32001 60`",
-                parse_mode='Markdown'
+                parse_mode='Markdown',
+                reply_markup=get_main_menu(user_id)
             )
             return
         
@@ -859,12 +1365,12 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         duration = int(parts[2])
         
         if duration < 60 or duration > 300:
-            await update.message.reply_text("❌ Duration must be 60-300 seconds!")
+            await update.message.reply_text("❌ Duration must be 60-300 seconds!", reply_markup=get_main_menu(user_id))
             return
         
         can_start, msg = attack_manager.can_start_attack(user_id)
         if not can_start:
-            await update.message.reply_text(msg)
+            await update.message.reply_text(msg, reply_markup=get_main_menu(user_id))
             context.user_data['awaiting_attack'] = False
             return
         
@@ -884,596 +1390,153 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         attack_manager.cleanup()
         
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text(f"❌ Error: {str(e)}", reply_markup=get_main_menu(user_id))
     
     context.user_data['awaiting_attack'] = False
 
-# ===== MY PLAN =====
-async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    plan, expiry = db.get_user_plan(user_id)
-    
-    logger.info(f"My Plan - User: {user_id}, Plan: {plan}, Expiry: {expiry}")
-    
-    if plan == "free":
-        text = (
-            "👤 *MY PLAN*\n\n"
-            "📊 Plan: 🆓 FREE\n"
-            "⏱️ Status: Inactive\n"
-            "⚡ 20x UDP: ❌ DISABLED\n\n"
-            "💡 *Upgrade:*\n"
-            "Use `/redeem CODE` to get premium access.\n"
-            "Contact an admin to get a code."
-        )
-    else:
-        if expiry:
-            days_left = max(0, (expiry - datetime.now()).days)
-            text = (
-                "👤 *MY PLAN*\n\n"
-                "📊 Plan: 💎 PREMIUM\n"
-                f"⏱️ Remaining: {days_left} days\n"
-                f"📅 Expires: {expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
-                "📌 Features:\n"
-                "• Full access\n"
-                "• 20x UDP Concurrent\n"
-                "• Unlimited attacks"
-            )
-        else:
-            text = (
-                "👤 *MY PLAN*\n\n"
-                "📊 Plan: 💎 PREMIUM\n"
-                "⏱️ Status: LIFETIME\n\n"
-                "📌 Features:\n"
-                "• Full access\n"
-                "• 20x UDP Concurrent\n"
-                "• Unlimited attacks"
-            )
-    
-    await query.edit_message_text(
-        text,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
-    )
-
-# ===== INFO =====
-async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    level = db.get_admin_level(user_id) or "USER"
-    plan, expiry = db.get_user_plan(user_id)
-    total_attacks = db.get_user_stats(user_id)
-    
-    if plan == "free":
-        plan_display = "FREE"
-    else:
-        if expiry:
-            days_left = max(0, (expiry - datetime.now()).days)
-            plan_display = f"PREMIUM ({days_left}d left)"
-        else:
-            plan_display = "PREMIUM (Lifetime)"
-    
-    await query.edit_message_text(
-        f"👤 *USER INFO*\n\n"
-        f"🆔 ID: {user_id}\n"
-        f"⭐ Level: {level.upper()}\n"
-        f"📊 Plan: {plan_display}\n"
-        f"⚡ 20x UDP: {'✅ ENABLED' if plan == 'premium' else '❌ DISABLED'}\n"
-        f"💥 Total Attacks: {total_attacks}",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
-    )
-
-# ===== STATS =====
-async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    if not db.is_admin(user_id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    total_attacks = db.get_total_attacks()
-    users = db.get_all_users()
-    admins = db.get_admins()
-    codes = db.get_codes()
-    active = len(attack_manager.active_attacks)
-    
-    premium_users = sum(1 for u in users if u.get('plan') == 'premium')
-    banned_users = sum(1 for u in users if u.get('is_banned', False))
-    
-    stats_text = (
-        f"📊 *BOT STATISTICS*\n\n"
-        f"👥 Total Users: {len(users)}\n"
-        f"💎 Premium Users: {premium_users}\n"
-        f"🚫 Banned Users: {banned_users}\n"
-        f"👑 Admins: {len(admins)}\n"
-        f"💥 Total Attacks: {total_attacks}\n"
-        f"🎫 Redeem Codes: {len(codes)}\n"
-        f"⚡ Active Attacks: {active}/{MAX_CONCURRENT}\n"
-        f"⚡ 20x UDP: ENABLED\n"
-        f"🌐 Status: ONLINE"
-    )
-    
-    await query.edit_message_text(
-        stats_text,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
-    )
-
-# ===== ADMIN PANEL =====
-async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    if not db.is_admin(user_id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("➕ GENERATE CODE", callback_data="admin_gen")],
-        [InlineKeyboardButton("📋 LIST CODES", callback_data="admin_list")],
-        [InlineKeyboardButton("🗑️ DELETE CODE", callback_data="admin_delete")],
-        [InlineKeyboardButton("📊 STATS", callback_data="stats")],
-        [InlineKeyboardButton("🔙 BACK", callback_data="back")]
-    ]
-    
-    await query.edit_message_text(
-        "⚙️ *ADMIN PANEL*\n\nSelect action:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-async def admin_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    keyboard = [
-        [InlineKeyboardButton("📅 1 DAY", callback_data="gen_1d")],
-        [InlineKeyboardButton("📅 3 DAYS", callback_data="gen_3d")],
-        [InlineKeyboardButton("📅 7 DAYS", callback_data="gen_7d")],
-        [InlineKeyboardButton("📅 30 DAYS", callback_data="gen_30d")],
-        [InlineKeyboardButton("📅 90 DAYS", callback_data="gen_90d")],
-        [InlineKeyboardButton("📅 LIFETIME", callback_data="gen_lifetime")],
-        [InlineKeyboardButton("🔙 BACK", callback_data="admin")]
-    ]
-    
-    await query.edit_message_text(
-        "➕ *GENERATE CODE*\n\nSelect duration:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-async def process_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    data = query.data.split('_')[1]
-    if data == "lifetime":
-        days = 3650
-    else:
-        days = int(data.replace('d', ''))
-    
-    code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
-    
-    if db.create_code(code, days, query.from_user.id):
-        await query.edit_message_text(
-            f"✅ *CODE GENERATED*\n\n"
-            f"Code: `{code}`\n"
-            f"Duration: {'LIFETIME' if days >= 3650 else f'{days} days'}\n\n"
-            f"Share this code with users!",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
-        )
-    else:
-        await query.edit_message_text("❌ Failed to generate code!")
-
-async def admin_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    codes = db.get_codes()
-    if not codes:
-        text = "📋 No codes generated yet."
-    else:
-        text = "📋 *REDEEM CODES*\n\n"
-        for c in codes[:20]:
-            status = "✅" if not c.get('is_used') else f"❌ Used"
-            used_by = f" by {c.get('used_by')}" if c.get('used_by') else ""
-            duration = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
-            text += f"`{c['code']}` - {duration} - {status}{used_by}\n"
-    
-    await query.edit_message_text(
-        text[:4000],
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
-    )
-
-async def admin_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    codes = db.get_codes(only_unused=True)
-    if not codes:
-        await query.edit_message_text("No unused codes to delete!")
-        return
-    
-    keyboard = []
-    for c in codes[:10]:
-        keyboard.append([InlineKeyboardButton(f"❌ {c['code']}", callback_data=f"del_{c['code']}")])
-    keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="admin")])
-    
-    await query.edit_message_text(
-        "🗑️ *DELETE CODE*\n\nSelect code to delete:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-async def process_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    code = query.data.split('_')[1]
-    if db.delete_code(code):
-        await query.edit_message_text(
-            f"✅ Code `{code}` deleted!",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
-        )
-    else:
-        await query.edit_message_text("❌ Failed to delete code!")
-
-# ===== OWNER PANEL =====
-async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    if not db.is_owner_or_pseudo(user_id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    keyboard = [
-        [InlineKeyboardButton("🛑 KILL SWITCH", callback_data="owner_kill")],
-        [InlineKeyboardButton("👑 PROMOTE ADMIN", callback_data="owner_promote")],
-        [InlineKeyboardButton("👑 DEMOTE ADMIN", callback_data="owner_demote")],
-        [InlineKeyboardButton("🚫 BAN USER", callback_data="owner_ban")],
-        [InlineKeyboardButton("✅ UNBAN USER", callback_data="owner_unban")],
-        [InlineKeyboardButton("📋 LIST ADMINS", callback_data="owner_list_admins")],
-        [InlineKeyboardButton("📋 LIST USERS", callback_data="owner_list_users")],
-        [InlineKeyboardButton("🚫 BANNED USERS", callback_data="owner_banned_users")],
-        [InlineKeyboardButton("📊 STATS", callback_data="stats")],
-        [InlineKeyboardButton("🔙 BACK", callback_data="back")]
-    ]
-    
-    await query.edit_message_text(
-        f"👑 *OWNER PANEL*\n\nSelect action:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
-async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not db.is_owner_or_pseudo(query.from_user.id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    banned = db.get_banned_users()
-    if not banned:
-        await query.edit_message_text("🚫 No banned users.")
-        return
-    
-    text = "🚫 *BANNED USERS*\n\n"
-    for user in banned[:20]:
-        user_id = user.get('user_id')
-        username = user.get('username', 'N/A')
-        reason = user.get('ban_reason', 'No reason')
-        banned_at = user.get('banned_at')
-        banned_at_str = banned_at.strftime('%Y-%m-%d') if banned_at else 'N/A'
-        text += f"• `{user_id}` - @{username}\n"
-        text += f"  Reason: {reason}\n"
-        text += f"  Banned: {banned_at_str}\n\n"
-    
-    await query.edit_message_text(
-        text[:4000],
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
-
-async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    users = db.get_all_users()
-    
-    if not users:
-        await query.edit_message_text("📋 No users found.")
-        return
-    
-    text = "👥 *ALL USERS*\n\n"
-    for user in users[:50]:
-        user_id = user.get('user_id')
-        username = user.get('username', 'N/A')
-        plan = user.get('plan', 'free').upper()
-        expiry = user.get('plan_expiry')
-        
-        if expiry:
-            if isinstance(expiry, str):
-                try:
-                    expiry = datetime.fromisoformat(expiry)
-                except:
-                    expiry = None
-            if expiry and isinstance(expiry, datetime):
-                days_left = max(0, (expiry - datetime.now()).days)
-                expiry_text = f"{days_left}d left"
-            else:
-                expiry_text = "Expired"
-        else:
-            expiry_text = "Lifetime" if plan == "PREMIUM" else "No plan"
-        
-        is_banned = "🚫" if user.get('is_banned') else "✅"
-        is_admin = "⭐" if db.is_admin(user_id) else ""
-        text += f"{is_banned} {is_admin} `{user_id}` - @{username}\n"
-        text += f"   📊 {plan} | ⏱️ {expiry_text}\n\n"
-    
-    if len(users) > 50:
-        text += f"... and {len(users) - 50} more users"
-    
-    await query.edit_message_text(
-        text[:4000],
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
-
-async def owner_kill_switch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not db.is_owner_or_pseudo(query.from_user.id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    attack_manager.stop_all_attacks()
-    
-    await query.edit_message_text(
-        f"🛑 *KILL SWITCH ACTIVATED*\n\n"
-        f"✅ All active attacks stopped\n"
-        f"⚡ System cleared!",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
-
-async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not db.is_owner_or_pseudo(user_id):
-        await update.message.reply_text("❌ Only Owner/Pseudo Owner can use this command!")
-        return
-    
-    attack_manager.stop_all_attacks()
-    
-    await update.message.reply_text(
-        f"🛑 *KILL SWITCH ACTIVATED*\n\n"
-        f"✅ All active attacks stopped\n"
-        f"⚡ System cleared!",
-        parse_mode='Markdown'
-    )
-
-async def owner_promote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text(
-        "👑 *PROMOTE ADMIN*\n\n"
-        "Choose role:\n"
-        "1. `admin` - Standard admin\n"
-        "2. `pseudo_owner` - Same as owner\n\n"
-        "Send: `USER_ID ROLE`\n"
-        "Example: `123456789 pseudo_owner`\n\n"
-        "Send /cancel to cancel",
-        parse_mode='Markdown'
-    )
-    context.user_data['awaiting_promote'] = True
-
 async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process promote admin"""
     if not context.user_data.get('awaiting_promote'):
         return
     
-    if update.message.text.lower() == '/cancel':
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    if text.lower() == '/cancel':
         context.user_data['awaiting_promote'] = False
-        await update.message.reply_text("✅ Cancelled.")
+        await update.message.reply_text("✅ Cancelled.", reply_markup=get_owner_menu())
         return
     
     try:
-        parts = update.message.text.split()
-        user_id = int(parts[0])
+        parts = text.split()
+        target_id = int(parts[0])
         level = parts[1].lower() if len(parts) > 1 else "admin"
         
         if level not in ["admin", "pseudo_owner"]:
-            await update.message.reply_text("❌ Invalid role! Use: admin or pseudo_owner")
-            context.user_data['awaiting_promote'] = False
+            await update.message.reply_text("❌ Invalid role! Use: admin or pseudo_owner", reply_markup=get_owner_menu())
             return
         
-        user = db.get_user(user_id)
+        user = db.get_user(target_id)
         if not user:
-            await update.message.reply_text(f"❌ User `{user_id}` not found. They need to start the bot first.", parse_mode='Markdown')
+            await update.message.reply_text(f"❌ User `{target_id}` not found. They need to start the bot first.", parse_mode='Markdown', reply_markup=get_owner_menu())
             context.user_data['awaiting_promote'] = False
             return
         
         username = user.get('username', 'Unknown')
         
-        if db.add_admin(user_id, username, level, update.effective_user.id):
+        if db.add_admin(target_id, username, level, user_id):
             await update.message.reply_text(
                 f"✅ *ADMIN PROMOTED!*\n\n"
-                f"User `{user_id}` is now {level.upper()}!\n"
+                f"User `{target_id}` is now {level.upper()}!\n"
                 f"They now have LIFETIME premium access automatically.",
-                parse_mode='Markdown'
+                parse_mode='Markdown',
+                reply_markup=get_owner_menu()
             )
         else:
-            await update.message.reply_text("❌ User is already an admin!", parse_mode='Markdown')
+            await update.message.reply_text("❌ User is already an admin!", parse_mode='Markdown', reply_markup=get_owner_menu())
     except ValueError:
-        await update.message.reply_text("❌ Invalid format! Use: `USER_ID ROLE`")
+        await update.message.reply_text("❌ Invalid format! Use: `USER_ID ROLE`", reply_markup=get_owner_menu())
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text(f"❌ Error: {str(e)}", reply_markup=get_owner_menu())
     
     context.user_data['awaiting_promote'] = False
 
-async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    admins = db.get_admins()
-    keyboard = []
-    
-    for admin in admins:
-        if admin['user_id'] != OWNER_ID:
-            level = admin.get('level', 'admin')
-            user_id = admin['user_id']
-            keyboard.append([InlineKeyboardButton(f"❌ `{user_id}` ({level})", callback_data=f"demote_{user_id}")])
-    
-    keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="owner")])
-    
-    if not keyboard:
-        await query.edit_message_text("No admins to demote!")
-        return
-    
-    await query.edit_message_text(
-        "👑 *DEMOTE ADMIN*\n\nSelect admin to demote:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
-
 async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = int(query.data.split('_')[1])
-    
-    if user_id == OWNER_ID:
-        await query.edit_message_text("❌ Cannot demote the main owner!")
+    """Process demote admin"""
+    if not context.user_data.get('awaiting_demote'):
         return
     
-    if db.remove_admin(user_id):
-        await query.edit_message_text(
-            f"✅ Admin `{user_id}` demoted!",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-        )
-    else:
-        await query.edit_message_text("❌ Failed to demote admin!")
-
-async def owner_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    text = update.message.text
     
-    await query.edit_message_text(
-        "🚫 *BAN USER*\n\n"
-        "Send user ID to ban:\n`123456789`\n\n"
-        "Optional: Add reason\n"
-        "Example: `123456789 Spamming`\n\n"
-        "Send /cancel to cancel",
-        parse_mode='Markdown'
-    )
-    context.user_data['awaiting_ban'] = True
+    if text == "🔙 BACK":
+        context.user_data.pop('awaiting_demote', None)
+        await update.message.reply_text("Back to owner panel.", reply_markup=get_owner_menu())
+        return
+    
+    if text.startswith("❌ "):
+        # Extract user ID from button text: "❌ 123456789 (admin)"
+        parts = text.replace("❌ ", "").split(" ")
+        if parts:
+            try:
+                target_id = int(parts[0])
+                
+                if target_id == OWNER_ID:
+                    await update.message.reply_text("❌ Cannot demote the main owner!", reply_markup=get_owner_menu())
+                    return
+                
+                if db.remove_admin(target_id):
+                    await update.message.reply_text(f"✅ Admin `{target_id}` demoted!", parse_mode='Markdown', reply_markup=get_owner_menu())
+                else:
+                    await update.message.reply_text("❌ Failed to demote admin!", reply_markup=get_owner_menu())
+            except:
+                await update.message.reply_text("❌ Invalid selection!", reply_markup=get_owner_menu())
+        
+        context.user_data.pop('awaiting_demote', None)
 
 async def process_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process ban user"""
     if not context.user_data.get('awaiting_ban'):
         return
     
-    if update.message.text.lower() == '/cancel':
+    user_id = update.effective_user.id
+    text = update.message.text
+    
+    if text.lower() == '/cancel':
         context.user_data['awaiting_ban'] = False
-        await update.message.reply_text("✅ Cancelled.")
+        await update.message.reply_text("✅ Cancelled.", reply_markup=get_owner_menu())
         return
     
     try:
-        parts = update.message.text.strip().split()
-        user_id = int(parts[0])
+        parts = text.strip().split()
+        target_id = int(parts[0])
         reason = ' '.join(parts[1:]) if len(parts) > 1 else "No reason provided"
         
-        if user_id == OWNER_ID:
-            await update.message.reply_text("❌ Cannot ban the main owner!")
+        if target_id == OWNER_ID:
+            await update.message.reply_text("❌ Cannot ban the main owner!", reply_markup=get_owner_menu())
             context.user_data['awaiting_ban'] = False
             return
         
-        if db.is_admin(user_id):
-            await update.message.reply_text("❌ Cannot ban an admin! Demote them first.")
+        if db.is_admin(target_id):
+            await update.message.reply_text("❌ Cannot ban an admin! Demote them first.", reply_markup=get_owner_menu())
             context.user_data['awaiting_ban'] = False
             return
         
-        db.ban_user(user_id, reason, update.effective_user.id)
+        db.ban_user(target_id, reason, user_id)
         await update.message.reply_text(
-            f"✅ User `{user_id}` banned!\n"
+            f"✅ User `{target_id}` banned!\n"
             f"Reason: {reason}",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=get_owner_menu()
         )
     except ValueError:
-        await update.message.reply_text("❌ Invalid user ID!")
+        await update.message.reply_text("❌ Invalid user ID!", reply_markup=get_owner_menu())
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text(f"❌ Error: {str(e)}", reply_markup=get_owner_menu())
     
     context.user_data['awaiting_ban'] = False
 
-async def owner_unban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    await query.edit_message_text(
-        "✅ *UNBAN USER*\n\n"
-        "Send user ID to unban:\n`123456789`\n\n"
-        "Send /cancel to cancel",
-        parse_mode='Markdown'
-    )
-    context.user_data['awaiting_unban'] = True
-
 async def process_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process unban user"""
     if not context.user_data.get('awaiting_unban'):
         return
     
-    if update.message.text.lower() == '/cancel':
+    text = update.message.text
+    
+    if text.lower() == '/cancel':
         context.user_data['awaiting_unban'] = False
-        await update.message.reply_text("✅ Cancelled.")
+        await update.message.reply_text("✅ Cancelled.", reply_markup=get_owner_menu())
         return
     
     try:
-        user_id = int(update.message.text.strip())
-        db.unban_user(user_id)
-        await update.message.reply_text(f"✅ User `{user_id}` unbanned!", parse_mode='Markdown')
+        target_id = int(text.strip())
+        db.unban_user(target_id)
+        await update.message.reply_text(f"✅ User `{target_id}` unbanned!", parse_mode='Markdown', reply_markup=get_owner_menu())
     except ValueError:
-        await update.message.reply_text("❌ Invalid user ID!")
+        await update.message.reply_text("❌ Invalid user ID!", reply_markup=get_owner_menu())
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
+        await update.message.reply_text(f"❌ Error: {str(e)}", reply_markup=get_owner_menu())
     
     context.user_data['awaiting_unban'] = False
-
-async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    admins = db.get_admins()
-    text = "👑 *ADMIN LIST*\n\n"
-    for admin in admins:
-        level = admin.get('level', 'admin').upper()
-        user_id = admin['user_id']
-        is_owner = "⭐ " if user_id == OWNER_ID else ""
-        username = admin.get('username', 'Unknown')
-        text += f"{is_owner}• `{user_id}` - {level} (@{username})\n"
-    
-    if not admins:
-        text = "No admins found."
-    
-    await query.edit_message_text(
-        text,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
 
 # ===== REDEEM COMMAND =====
 async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1486,7 +1549,8 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Send: `/redeem CODE`\n"
             "Example: `/redeem ABC123XYZ`\n\n"
             "💡 You can only redeem ONE code.",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=get_main_menu(user_id)
         )
         return
     
@@ -1504,7 +1568,8 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"⏱️ Remaining: {int(days_left)} days\n"
                     f"📅 Expires: {expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
                     f"💡 You don't need to redeem again.",
-                    parse_mode='Markdown'
+                    parse_mode='Markdown',
+                    reply_markup=get_main_menu(user_id)
                 )
                 return
     
@@ -1522,7 +1587,8 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📅 Expires: {'Never' if result['access_days'] >= 3650 else expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
             f"🎉 You now have premium access!\n"
             f"Use /start to begin attacking!",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=get_main_menu(user_id)
         )
         
         verify = db.get_user(user_id)
@@ -1532,11 +1598,13 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ *INVALID CODE*\n\n"
             "The code is invalid or already used.",
-            parse_mode='Markdown'
+            parse_mode='Markdown',
+            reply_markup=get_main_menu(user_id)
         )
 
 # ===== STATUS COMMAND =====
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     stats = attack_manager.get_stats()
     users = db.get_all_users()
     
@@ -1550,44 +1618,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
         f"📌 /attack IP PORT TIME",
-        parse_mode='Markdown'
-    )
-
-# ===== BACK =====
-async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user = update.effective_user
-    user_id = user.id
-    is_admin = db.is_admin(user_id)
-    plan, expiry = db.get_user_plan(user_id)
-    
-    keyboard = []
-    if not db.is_banned(user_id):
-        if plan == "premium" or is_admin:
-            keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
-        keyboard.append([InlineKeyboardButton("👤 MY PLAN", callback_data="my_plan")])
-    
-    if is_admin:
-        keyboard.append([InlineKeyboardButton("📊 STATS", callback_data="stats")])
-        keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
-    
-    if db.is_owner_or_pseudo(user_id):
-        keyboard.append([InlineKeyboardButton("👑 OWNER", callback_data="owner")])
-    
-    if not is_admin:
-        keyboard.append([InlineKeyboardButton("👤 MY INFO", callback_data="info")])
-    
-    await query.edit_message_text(
-        f"👋 *WELCOME BACK*",
-        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
-        parse_mode='Markdown'
+        parse_mode='Markdown',
+        reply_markup=get_main_menu(user_id)
     )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("✅ Cancelled!")
+    await update.message.reply_text("✅ Cancelled!", reply_markup=get_main_menu(update.effective_user.id))
 
 # ===== RUN BOT =====
 application = None
@@ -1600,62 +1637,16 @@ def run_bot():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     application = app
     
-    # ===== COMMAND HANDLERS (Highest Priority) =====
+    # ===== COMMAND HANDLERS =====
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("attack", attack_command))
     app.add_handler(CommandHandler("redeem", redeem_command))
-    app.add_handler(CommandHandler("kill", kill_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("cancel", cancel))
     
-    # ===== CALLBACK QUERY HANDLERS =====
-    app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
-    app.add_handler(CallbackQueryHandler(my_plan_callback, pattern="^my_plan$"))
-    app.add_handler(CallbackQueryHandler(info_callback, pattern="^info$"))
-    app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
-    app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
-    
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
-    app.add_handler(CallbackQueryHandler(admin_gen_callback, pattern="^admin_gen$"))
-    app.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
-    app.add_handler(CallbackQueryHandler(admin_list_callback, pattern="^admin_list$"))
-    app.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
-    app.add_handler(CallbackQueryHandler(process_delete_callback, pattern="^del_"))
-    
-    app.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
-    app.add_handler(CallbackQueryHandler(owner_kill_switch_callback, pattern="^owner_kill$"))
-    app.add_handler(CallbackQueryHandler(owner_promote_callback, pattern="^owner_promote$"))
-    app.add_handler(CallbackQueryHandler(owner_demote_callback, pattern="^owner_demote$"))
-    app.add_handler(CallbackQueryHandler(owner_ban_callback, pattern="^owner_ban$"))
-    app.add_handler(CallbackQueryHandler(owner_unban_callback, pattern="^owner_unban$"))
-    app.add_handler(CallbackQueryHandler(owner_list_admins_callback, pattern="^owner_list_admins$"))
-    app.add_handler(CallbackQueryHandler(owner_list_users_callback, pattern="^owner_list_users$"))
-    app.add_handler(CallbackQueryHandler(owner_banned_users, pattern="^owner_banned_users$"))
-    app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
-    
-    # ===== MESSAGE HANDLERS (Lowest Priority) =====
-    # Only process text messages that are NOT commands
-    # The ~filters.COMMAND filter ensures commands are NOT processed here
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d+\s+(admin|pseudo_owner)$'), 
-        process_promote
-    ))
-    
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d+(\s+.+)?$'), 
-        process_ban
-    ))
-    
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d+$'), 
-        process_unban
-    ))
-    
-    # Catch-all for any other text messages (attack commands, etc.)
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND, 
-        process_attack
-    ))
+    # ===== MESSAGE HANDLER (Handles ALL menu buttons and text input) =====
+    # This single handler processes everything except commands
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_buttons))
     
     loop.run_until_complete(app.initialize())
     loop.run_until_complete(app.start())
