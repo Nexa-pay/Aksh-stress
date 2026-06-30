@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION
+# app.py - COMPLETE FIXED VERSION WITH WORKING ADMIN MANAGEMENT
 import os
 import logging
 import asyncio
@@ -89,7 +89,10 @@ class Database:
                     "plan": "free",
                     "plan_expiry": None,
                     "has_used_code": False,
-                    "is_banned": False
+                    "is_banned": False,
+                    "ban_reason": None,
+                    "banned_by": None,
+                    "banned_at": None
                 }},
                 upsert=True
             )
@@ -218,6 +221,11 @@ class Database:
             return list(self.admins.find({}))
         return [{"user_id": uid, "level": data.get("level", "admin")} for uid, data in self.admins.items()]
     
+    def get_banned_users(self):
+        if not self.memory_mode:
+            return list(self.users.find({"is_banned": True}))
+        return [uid for uid, data in self.users.items() if data.get("is_banned", False)]
+    
     def ban_user(self, user_id, reason=None, banned_by=None):
         if not self.memory_mode:
             self.users.update_one(
@@ -226,15 +234,17 @@ class Database:
             )
         elif user_id in self.users:
             self.users[user_id]["is_banned"] = True
+            self.users[user_id]["ban_reason"] = reason
     
     def unban_user(self, user_id):
         if not self.memory_mode:
             self.users.update_one(
                 {"user_id": user_id},
-                {"$set": {"is_banned": False, "ban_reason": None}}
+                {"$set": {"is_banned": False, "ban_reason": None, "banned_by": None, "banned_at": None}}
             )
         elif user_id in self.users:
             self.users[user_id]["is_banned"] = False
+            self.users[user_id]["ban_reason"] = None
     
     def is_banned(self, user_id):
         user = self.get_user(user_id)
@@ -635,6 +645,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
+    # Clear any user data
+    context.user_data.clear()
+    
     # Add user to database
     db.add_user(user_id, user.username, user.first_name)
     
@@ -997,11 +1010,13 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active = len(attack_manager.active_attacks)
     
     premium_users = sum(1 for u in users if u.get('plan') == 'premium')
+    banned_users = len(db.get_banned_users())
     
     stats_text = (
         f"📊 *BOT STATISTICS*\n\n"
         f"👥 Total Users: {len(users)}\n"
         f"💎 Premium Users: {premium_users}\n"
+        f"🚫 Banned Users: {banned_users}\n"
         f"👑 Admins: {len(admins)}\n"
         f"💥 Total Attacks: {total_attacks}\n"
         f"🎫 Redeem Codes: {len(codes)}\n"
@@ -1151,6 +1166,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📊 STATS", callback_data="stats")],
         [InlineKeyboardButton("📋 LIST ADMINS", callback_data="owner_list_admins")],
         [InlineKeyboardButton("📋 LIST USERS", callback_data="owner_list_users")],
+        [InlineKeyboardButton("🚫 BANNED USERS", callback_data="owner_banned_users")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
     
@@ -1158,6 +1174,36 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👑 *OWNER PANEL*\n\nSelect action:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
+    )
+
+async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not db.is_owner_or_pseudo(query.from_user.id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    banned = db.get_banned_users()
+    if not banned:
+        await query.edit_message_text("🚫 No banned users.")
+        return
+    
+    text = "🚫 *BANNED USERS*\n\n"
+    for user in banned[:20]:
+        user_id = user.get('user_id')
+        username = user.get('username', 'N/A')
+        reason = user.get('ban_reason', 'No reason')
+        banned_at = user.get('banned_at')
+        banned_at_str = banned_at.strftime('%Y-%m-%d') if banned_at else 'N/A'
+        text += f"• `{user_id}` - @{username}\n"
+        text += f"  Reason: {reason}\n"
+        text += f"  Banned: {banned_at_str}\n\n"
+    
+    await query.edit_message_text(
+        text[:4000],
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
 async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1285,6 +1331,12 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['awaiting_promote'] = False
             return
         
+        # Check if already admin
+        if db.is_admin(user_id):
+            await update.message.reply_text(f"❌ User `{user_id}` is already an admin!", parse_mode='Markdown')
+            context.user_data['awaiting_promote'] = False
+            return
+        
         username = user.get('username', 'Unknown')
         
         # Add as admin
@@ -1296,7 +1348,7 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode='Markdown'
             )
         else:
-            await update.message.reply_text("❌ User is already an admin!", parse_mode='Markdown')
+            await update.message.reply_text("❌ Failed to promote user!", parse_mode='Markdown')
     except ValueError:
         await update.message.reply_text("❌ Invalid format! Use: `USER_ID ROLE`")
     except Exception as e:
@@ -1314,7 +1366,8 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
     for admin in admins:
         if admin['user_id'] != OWNER_ID:
             level = admin.get('level', 'admin')
-            keyboard.append([InlineKeyboardButton(f"❌ {admin['user_id']} ({level})", callback_data=f"demote_{admin['user_id']}")])
+            user_id = admin['user_id']
+            keyboard.append([InlineKeyboardButton(f"❌ {user_id} ({level})", callback_data=f"demote_{user_id}")])
     
     keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="owner")])
     
@@ -1380,6 +1433,11 @@ async def process_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['awaiting_ban'] = False
             return
         
+        if db.is_admin(user_id):
+            await update.message.reply_text("❌ Cannot ban an admin! Demote them first.")
+            context.user_data['awaiting_ban'] = False
+            return
+        
         db.ban_user(user_id, reason, update.effective_user.id)
         await update.message.reply_text(
             f"✅ User `{user_id}` banned!\n"
@@ -1398,7 +1456,9 @@ async def owner_unban_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.answer()
     
     await query.edit_message_text(
-        "✅ *UNBAN USER*\n\nSend user ID to unban:\n`123456789`\n\nSend /cancel to cancel",
+        "✅ *UNBAN USER*\n\n"
+        "Send user ID to unban:\n`123456789`\n\n"
+        "Send /cancel to cancel",
         parse_mode='Markdown'
     )
     context.user_data['awaiting_unban'] = True
@@ -1433,7 +1493,11 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
         level = admin.get('level', 'admin').upper()
         user_id = admin['user_id']
         is_owner = "⭐ " if user_id == OWNER_ID else ""
-        text += f"{is_owner}• `{user_id}` - {level}\n"
+        username = admin.get('username', 'Unknown')
+        text += f"{is_owner}• `{user_id}` - {level} (@{username})\n"
+    
+    if not admins:
+        text = "No admins found."
     
     await query.edit_message_text(
         text,
@@ -1557,6 +1621,22 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("✅ Cancelled!")
 
+# ===== MESSAGE ROUTER =====
+async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Route messages based on user state"""
+    # Check what state the user is in
+    if context.user_data.get('awaiting_attack'):
+        await process_attack(update, context)
+    elif context.user_data.get('awaiting_promote'):
+        await process_promote(update, context)
+    elif context.user_data.get('awaiting_ban'):
+        await process_ban(update, context)
+    elif context.user_data.get('awaiting_unban'):
+        await process_unban(update, context)
+    else:
+        # If no state, ignore - commands are handled separately
+        pass
+
 # ===== RUN BOT =====
 application = None
 
@@ -1600,13 +1680,11 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(owner_unban_callback, pattern="^owner_unban$"))
     app.add_handler(CallbackQueryHandler(owner_list_admins_callback, pattern="^owner_list_admins$"))
     app.add_handler(CallbackQueryHandler(owner_list_users_callback, pattern="^owner_list_users$"))
+    app.add_handler(CallbackQueryHandler(owner_banned_users, pattern="^owner_banned_users$"))
     app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
     
-    # Messages - ORDER MATTERS! Put more specific handlers first
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_attack))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_promote))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_ban))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_unban))
+    # Single message router - processes all non-command text messages
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
     
     loop.run_until_complete(app.initialize())
     loop.run_until_complete(app.start())
