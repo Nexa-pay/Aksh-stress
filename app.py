@@ -445,9 +445,6 @@ class AttackManager:
         self.current_attack_duration = 0
     
     def get_cooldown_time(self, duration):
-        """Calculate cooldown time based on attack duration"""
-        # Cooldown = attack duration + 5 seconds buffer
-        # Minimum 60 seconds, Maximum 100 seconds
         cooldown = duration + 5
         if cooldown < MIN_COOLDOWN:
             cooldown = MIN_COOLDOWN
@@ -457,11 +454,9 @@ class AttackManager:
     
     def can_start_attack(self, user_id):
         with self.lock:
-            # Check if any attack is already running
             if self.global_attack_running:
                 return False, f"❌ Attack already running!\nUser: {self.current_attacker}\nPlease wait for it to finish."
             
-            # Check user cooldown based on last attack duration
             last_attack_time = db.get_last_attack_time(user_id)
             last_duration = db.get_last_attack_duration(user_id)
             
@@ -579,7 +574,6 @@ async def send_attack_alert(attack_info):
         user = db.get_user(attack_info['user_id'])
         plan = user.get('plan', 'free') if user else 'free'
         
-        # Calculate cooldown for this attack
         cooldown = attack_manager.get_cooldown_time(attack_info['duration'])
         
         message = (
@@ -685,7 +679,6 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
     
     success_count = sum(1 for r in results if r.get('success', False))
     
-    # Calculate cooldown for this attack
     cooldown = attack_manager.get_cooldown_time(duration)
     
     final_text = (
@@ -745,7 +738,6 @@ async def update_timer(status_msg, duration, target, port):
 
 # ===== CHECK API STATUS =====
 async def check_api_status():
-    """Check if API is connected"""
     try:
         url = "https://api.susstresser.com/panel/api/api.php"
         params = {
@@ -800,7 +792,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if stats['is_running']:
         attack_status = f"\n⚠️ *Attack in progress by another user!*\nPlease wait..."
     
-    # Check user cooldown
     cooldown_status = ""
     last_attack_time = db.get_last_attack_time(user_id)
     last_duration = db.get_last_attack_duration(user_id)
@@ -1053,7 +1044,6 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     plan, expiry = db.get_user_plan(user_id)
     
-    # Get user's last attack info
     last_duration = db.get_last_attack_duration(user_id)
     last_attack_time = db.get_last_attack_time(user_id)
     cooldown_info = ""
@@ -1392,7 +1382,6 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
         else:
             expiry_text = "Lifetime" if plan == "PREMIUM" else "No plan"
         
-        # Get user's last attack info
         last_duration = db.get_last_attack_duration(user_id)
         last_attack_time = db.get_last_attack_time(user_id)
         cooldown_info = ""
@@ -1457,6 +1446,7 @@ async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
+# ===== PROMOTE ADMIN =====
 async def owner_promote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1484,23 +1474,24 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         parts = update.message.text.split()
+        if len(parts) < 2:
+            await update.message.reply_text("❌ Use: `USER_ID ROLE`\nExample: `123456789 pseudo_owner`")
+            return
+        
         user_id = int(parts[0])
         level = parts[1].lower() if len(parts) > 1 else "admin"
         
         if level not in ["admin", "pseudo_owner"]:
             await update.message.reply_text("❌ Invalid role! Use: admin or pseudo_owner")
-            context.user_data['awaiting_promote'] = False
             return
         
         user = db.get_user(user_id)
         if not user:
             await update.message.reply_text(f"❌ User `{user_id}` not found. They need to start the bot first.", parse_mode='Markdown')
-            context.user_data['awaiting_promote'] = False
             return
         
         if db.is_admin(user_id):
             await update.message.reply_text(f"❌ User `{user_id}` is already an admin!", parse_mode='Markdown')
-            context.user_data['awaiting_promote'] = False
             return
         
         username = user.get('username', 'Unknown')
@@ -1508,7 +1499,8 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if db.add_admin(user_id, username, level, update.effective_user.id):
             await update.message.reply_text(
                 f"✅ *ADMIN PROMOTED!*\n\n"
-                f"User `{user_id}` is now {level.upper()}!",
+                f"User `{user_id}` is now {level.upper()}!\n"
+                f"They now have LIFETIME premium access.",
                 parse_mode='Markdown'
             )
         else:
@@ -1520,6 +1512,7 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['awaiting_promote'] = False
 
+# ===== DEMOTE ADMIN =====
 async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1575,6 +1568,7 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await query.edit_message_text("❌ Failed to demote admin!")
 
+# ===== BAN/UNBAN FUNCTIONS =====
 async def owner_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
