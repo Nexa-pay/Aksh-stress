@@ -1269,8 +1269,10 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user_id = query.from_user.id
+    
+    # Check if user is owner OR pseudo_owner (both have same power)
     if not db.is_owner_or_pseudo(user_id):
-        await query.answer("Access denied!", show_alert=True)
+        await query.answer("Access denied! Only Owner and Pseudo_Owner can access this.", show_alert=True)
         return
     
     keyboard = [
@@ -1303,7 +1305,6 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Access denied!", show_alert=True)
         return
     
-    # Send loading message
     await query.edit_message_text(
         "🔌 *Checking API Status...*\n\nPlease wait...",
         parse_mode='Markdown'
@@ -1335,6 +1336,11 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def owner_promote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
     
     await query.edit_message_text(
         "👑 *PROMOTE ADMIN*\n\n"
@@ -1402,6 +1408,11 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
     admins = db.get_admins()
     keyboard = []
     
@@ -1409,11 +1420,11 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
         admin_id = admin['user_id']
         level = admin.get('level', 'admin')
         
-        # Skip owner
+        # Skip owner - cannot be demoted
         if admin_id == OWNER_ID:
             continue
         
-        # Skip pseudo_owner (same power as owner)
+        # Skip pseudo_owner - cannot be demoted
         if level == "pseudo_owner":
             continue
         
@@ -1422,11 +1433,15 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="owner")])
     
     if not keyboard:
-        await query.edit_message_text("No admins to demote!\n\n(Only regular admins can be demoted. Owner and Pseudo_Owner cannot be demoted.)")
+        await query.edit_message_text(
+            "👑 *DEMOTE ADMIN*\n\nNo admins to demote!\n\n"
+            "📌 Note: Owner and Pseudo_Owner cannot be demoted.",
+            parse_mode='Markdown'
+        )
         return
     
     await query.edit_message_text(
-        "👑 *DEMOTE ADMIN*\n\nSelect admin to demote:\n(Note: Pseudo_Owner cannot be demoted)",
+        "👑 *DEMOTE ADMIN*\n\nSelect admin to demote:\n(Note: Owner and Pseudo_Owner cannot be demoted)",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -1461,6 +1476,11 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def owner_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
     
     await query.edit_message_text(
         "🚫 *BAN USER*\n\n"
@@ -1519,6 +1539,11 @@ async def owner_unban_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
     await query.edit_message_text(
         "✅ *UNBAN USER*\n\n"
         "Send user ID to unban:\n`123456789`\n\n"
@@ -1551,6 +1576,11 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
     
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
     admins = db.get_admins()
     if not admins:
         await query.edit_message_text("👑 *ADMIN LIST*\n\nNo admins found.", parse_mode='Markdown')
@@ -1559,11 +1589,11 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
     text = "👑 *ADMIN LIST*\n\n"
     for admin in admins:
         level = admin.get('level', 'admin').upper()
-        user_id = admin['user_id']
-        is_owner = "⭐ " if user_id == OWNER_ID else ""
+        admin_id = admin['user_id']
+        is_owner = "⭐ " if admin_id == OWNER_ID else ""
         is_pseudo = "🔱 " if level == "PSEUDO_OWNER" else ""
         username = admin.get('username', 'Unknown')
-        text += f"{is_owner}{is_pseudo}• `{user_id}` - {level} (@{username})\n"
+        text += f"{is_owner}{is_pseudo}• `{admin_id}` - {level} (@{username})\n"
     
     await query.edit_message_text(
         text,
@@ -1575,6 +1605,11 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
     query = update.callback_query
     await query.answer()
     
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
     users = db.get_all_users()
     
     if not users:
@@ -1583,7 +1618,7 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
     
     text = "👥 *ALL USERS*\n\n"
     for user in users[:50]:
-        user_id = user.get('user_id')
+        user_id2 = user.get('user_id')
         username = user.get('username', 'N/A')
         plan = user.get('plan', 'free').upper()
         expiry = user.get('plan_expiry')
@@ -1602,8 +1637,8 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
         else:
             expiry_text = "Lifetime" if plan == "PREMIUM" else "No plan"
         
-        last_duration = db.get_last_attack_duration(user_id)
-        last_attack_time = db.get_last_attack_time(user_id)
+        last_duration = db.get_last_attack_duration(user_id2)
+        last_attack_time = db.get_last_attack_time(user_id2)
         cooldown_info = ""
         if last_attack_time:
             if isinstance(last_attack_time, str):
@@ -1619,8 +1654,8 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
                     cooldown_info = f" (Cooldown: {remaining}s)"
         
         is_banned = "🚫" if user.get('is_banned') else "✅"
-        is_admin = "⭐" if db.is_admin(user_id) else ""
-        text += f"{is_banned} {is_admin} `{user_id}` - @{username}\n"
+        is_admin = "⭐" if db.is_admin(user_id2) else ""
+        text += f"{is_banned} {is_admin} `{user_id2}` - @{username}\n"
         text += f"   📊 {plan} | ⏱️ {expiry_text}{cooldown_info}\n\n"
     
     if len(users) > 50:
@@ -1636,7 +1671,8 @@ async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query = update.callback_query
     await query.answer()
     
-    if not db.is_owner_or_pseudo(query.from_user.id):
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
         await query.answer("Access denied!", show_alert=True)
         return
     
@@ -1647,12 +1683,12 @@ async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     text = "🚫 *BANNED USERS*\n\n"
     for user in banned[:20]:
-        user_id = user.get('user_id')
+        user_id2 = user.get('user_id')
         username = user.get('username', 'N/A')
         reason = user.get('ban_reason', 'No reason')
         banned_at = user.get('banned_at')
         banned_at_str = banned_at.strftime('%Y-%m-%d') if banned_at else 'N/A'
-        text += f"• `{user_id}` - @{username}\n"
+        text += f"• `{user_id2}` - @{username}\n"
         text += f"  Reason: {reason}\n"
         text += f"  Banned: {banned_at_str}\n\n"
     
@@ -1666,7 +1702,8 @@ async def owner_kill_switch_callback(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
     
-    if not db.is_owner_or_pseudo(query.from_user.id):
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
         await query.answer("Access denied!", show_alert=True)
         return
     
@@ -1891,6 +1928,7 @@ if __name__ == "__main__":
     print("📌 Global Cooldown - One attack at a time")
     print(f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s")
     print(f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s (Based on attack time)")
+    print("📌 Owner & Pseudo_Owner have equal powers")
     print("📌 Live Time Updates in Bot DM")
     print("📌 Real-time Alerts to Admins")
     print("=" * 50)
