@@ -1,4 +1,4 @@
-# app.py - SIMPLIFIED GURU BOT (UDP ONLY WITH DYNAMIC COOLDOWN)
+# app.py - COMPLETE FIXED VERSION
 import os
 import logging
 import asyncio
@@ -755,6 +755,8 @@ async def check_api_status():
                 elapsed = time.time() - start_time
                 if response.status == 200:
                     return True, f"✅ Connected (Response: {elapsed:.2f}s)"
+                elif response.status == 503:
+                    return False, "⚠️ API is temporarily unavailable (503 Service Unavailable)\nPlease try again later."
                 else:
                     return False, f"❌ Error (Status: {response.status})"
     except Exception as e:
@@ -1301,6 +1303,12 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Access denied!", show_alert=True)
         return
     
+    # Send loading message
+    await query.edit_message_text(
+        "🔌 *Checking API Status...*\n\nPlease wait...",
+        parse_mode='Markdown'
+    )
+    
     status, message = await check_api_status()
     
     status_text = (
@@ -1311,139 +1319,16 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ Concurrent: {MAX_CONCURRENT}x\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
         f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
-        f"🌐 Status: {'ONLINE' if '✅' in message else 'OFFLINE'}"
+        f"🌐 Status: {'🟢 ONLINE' if '✅' in message else '🔴 OFFLINE'}"
     )
     
     await query.edit_message_text(
         status_text,
         parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔄 REFRESH", callback_data="owner_api_status"), InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
-
-# ===== OWNER PANEL FUNCTIONS =====
-async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not db.is_owner_or_pseudo(query.from_user.id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    banned = db.get_banned_users()
-    if not banned:
-        await query.edit_message_text("🚫 No banned users.")
-        return
-    
-    text = "🚫 *BANNED USERS*\n\n"
-    for user in banned[:20]:
-        user_id = user.get('user_id')
-        username = user.get('username', 'N/A')
-        reason = user.get('ban_reason', 'No reason')
-        banned_at = user.get('banned_at')
-        banned_at_str = banned_at.strftime('%Y-%m-%d') if banned_at else 'N/A'
-        text += f"• `{user_id}` - @{username}\n"
-        text += f"  Reason: {reason}\n"
-        text += f"  Banned: {banned_at_str}\n\n"
-    
-    await query.edit_message_text(
-        text[:4000],
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
-
-async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    users = db.get_all_users()
-    
-    if not users:
-        await query.edit_message_text("📋 No users found.")
-        return
-    
-    text = "👥 *ALL USERS*\n\n"
-    for user in users[:50]:
-        user_id = user.get('user_id')
-        username = user.get('username', 'N/A')
-        plan = user.get('plan', 'free').upper()
-        expiry = user.get('plan_expiry')
-        
-        if expiry:
-            if isinstance(expiry, str):
-                try:
-                    expiry = datetime.fromisoformat(expiry)
-                except:
-                    expiry = None
-            if expiry and isinstance(expiry, datetime):
-                days_left = max(0, (expiry - datetime.now()).days)
-                expiry_text = f"{days_left}d left"
-            else:
-                expiry_text = "Expired"
-        else:
-            expiry_text = "Lifetime" if plan == "PREMIUM" else "No plan"
-        
-        last_duration = db.get_last_attack_duration(user_id)
-        last_attack_time = db.get_last_attack_time(user_id)
-        cooldown_info = ""
-        if last_attack_time:
-            if isinstance(last_attack_time, str):
-                try:
-                    last_attack_time = datetime.fromisoformat(last_attack_time)
-                except:
-                    last_attack_time = None
-            if last_attack_time and isinstance(last_attack_time, datetime):
-                cooldown = attack_manager.get_cooldown_time(last_duration)
-                elapsed = (datetime.now() - last_attack_time).total_seconds()
-                if elapsed < cooldown:
-                    remaining = int(cooldown - elapsed)
-                    cooldown_info = f" (Cooldown: {remaining}s)"
-        
-        is_banned = "🚫" if user.get('is_banned') else "✅"
-        is_admin = "⭐" if db.is_admin(user_id) else ""
-        text += f"{is_banned} {is_admin} `{user_id}` - @{username}\n"
-        text += f"   📊 {plan} | ⏱️ {expiry_text}{cooldown_info}\n\n"
-    
-    if len(users) > 50:
-        text += f"... and {len(users) - 50} more users"
-    
-    await query.edit_message_text(
-        text[:4000],
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
-
-async def owner_kill_switch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    if not db.is_owner_or_pseudo(query.from_user.id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    attack_manager.stop_all_attacks()
-    
-    await query.edit_message_text(
-        f"🛑 *KILL SWITCH ACTIVATED*\n\n"
-        f"✅ All active attacks stopped\n"
-        f"⚡ System cleared!",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
-
-async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not db.is_owner_or_pseudo(user_id):
-        await update.message.reply_text("❌ Only Owner/Pseudo Owner can use this command!")
-        return
-    
-    attack_manager.stop_all_attacks()
-    
-    await update.message.reply_text(
-        f"🛑 *KILL SWITCH ACTIVATED*\n\n"
-        f"✅ All active attacks stopped\n"
-        f"⚡ System cleared!",
-        parse_mode='Markdown'
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 REFRESH", callback_data="owner_api_status")],
+            [InlineKeyboardButton("🔙 BACK", callback_data="owner")]
+        ])
     )
 
 # ===== PROMOTE ADMIN =====
@@ -1524,10 +1409,12 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
         admin_id = admin['user_id']
         level = admin.get('level', 'admin')
         
-        if level == "pseudo_owner":
+        # Skip owner
+        if admin_id == OWNER_ID:
             continue
         
-        if admin_id == OWNER_ID:
+        # Skip pseudo_owner (same power as owner)
+        if level == "pseudo_owner":
             continue
         
         keyboard.append([InlineKeyboardButton(f"❌ {admin_id} ({level})", callback_data=f"demote_{admin_id}")])
@@ -1535,7 +1422,7 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="owner")])
     
     if not keyboard:
-        await query.edit_message_text("No admins to demote!")
+        await query.edit_message_text("No admins to demote!\n\n(Only regular admins can be demoted. Owner and Pseudo_Owner cannot be demoted.)")
         return
     
     await query.edit_message_text(
@@ -1550,10 +1437,12 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = int(query.data.split('_')[1])
     
+    # Check if trying to demote owner
     if user_id == OWNER_ID:
         await query.edit_message_text("❌ Cannot demote the main owner!")
         return
     
+    # Check if trying to demote pseudo_owner
     admin_level = db.get_admin_level(user_id)
     if admin_level == "pseudo_owner":
         await query.edit_message_text("❌ Cannot demote Pseudo_Owner! They have the same power as Owner.")
@@ -1663,6 +1552,10 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
     await query.answer()
     
     admins = db.get_admins()
+    if not admins:
+        await query.edit_message_text("👑 *ADMIN LIST*\n\nNo admins found.", parse_mode='Markdown')
+        return
+    
     text = "👑 *ADMIN LIST*\n\n"
     for admin in admins:
         level = admin.get('level', 'admin').upper()
@@ -1672,13 +1565,135 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
         username = admin.get('username', 'Unknown')
         text += f"{is_owner}{is_pseudo}• `{user_id}` - {level} (@{username})\n"
     
-    if not admins:
-        text = "No admins found."
-    
     await query.edit_message_text(
         text,
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+    )
+
+async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    users = db.get_all_users()
+    
+    if not users:
+        await query.edit_message_text("📋 No users found.")
+        return
+    
+    text = "👥 *ALL USERS*\n\n"
+    for user in users[:50]:
+        user_id = user.get('user_id')
+        username = user.get('username', 'N/A')
+        plan = user.get('plan', 'free').upper()
+        expiry = user.get('plan_expiry')
+        
+        if expiry:
+            if isinstance(expiry, str):
+                try:
+                    expiry = datetime.fromisoformat(expiry)
+                except:
+                    expiry = None
+            if expiry and isinstance(expiry, datetime):
+                days_left = max(0, (expiry - datetime.now()).days)
+                expiry_text = f"{days_left}d left"
+            else:
+                expiry_text = "Expired"
+        else:
+            expiry_text = "Lifetime" if plan == "PREMIUM" else "No plan"
+        
+        last_duration = db.get_last_attack_duration(user_id)
+        last_attack_time = db.get_last_attack_time(user_id)
+        cooldown_info = ""
+        if last_attack_time:
+            if isinstance(last_attack_time, str):
+                try:
+                    last_attack_time = datetime.fromisoformat(last_attack_time)
+                except:
+                    last_attack_time = None
+            if last_attack_time and isinstance(last_attack_time, datetime):
+                cooldown = attack_manager.get_cooldown_time(last_duration)
+                elapsed = (datetime.now() - last_attack_time).total_seconds()
+                if elapsed < cooldown:
+                    remaining = int(cooldown - elapsed)
+                    cooldown_info = f" (Cooldown: {remaining}s)"
+        
+        is_banned = "🚫" if user.get('is_banned') else "✅"
+        is_admin = "⭐" if db.is_admin(user_id) else ""
+        text += f"{is_banned} {is_admin} `{user_id}` - @{username}\n"
+        text += f"   📊 {plan} | ⏱️ {expiry_text}{cooldown_info}\n\n"
+    
+    if len(users) > 50:
+        text += f"... and {len(users) - 50} more users"
+    
+    await query.edit_message_text(
+        text[:4000],
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+    )
+
+async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not db.is_owner_or_pseudo(query.from_user.id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    banned = db.get_banned_users()
+    if not banned:
+        await query.edit_message_text("🚫 No banned users.")
+        return
+    
+    text = "🚫 *BANNED USERS*\n\n"
+    for user in banned[:20]:
+        user_id = user.get('user_id')
+        username = user.get('username', 'N/A')
+        reason = user.get('ban_reason', 'No reason')
+        banned_at = user.get('banned_at')
+        banned_at_str = banned_at.strftime('%Y-%m-%d') if banned_at else 'N/A'
+        text += f"• `{user_id}` - @{username}\n"
+        text += f"  Reason: {reason}\n"
+        text += f"  Banned: {banned_at_str}\n\n"
+    
+    await query.edit_message_text(
+        text[:4000],
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+    )
+
+async def owner_kill_switch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    if not db.is_owner_or_pseudo(query.from_user.id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    attack_manager.stop_all_attacks()
+    
+    await query.edit_message_text(
+        f"🛑 *KILL SWITCH ACTIVATED*\n\n"
+        f"✅ All active attacks stopped\n"
+        f"⚡ System cleared!",
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+    )
+
+async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not db.is_owner_or_pseudo(user_id):
+        await update.message.reply_text("❌ Only Owner/Pseudo Owner can use this command!")
+        return
+    
+    attack_manager.stop_all_attacks()
+    
+    await update.message.reply_text(
+        f"🛑 *KILL SWITCH ACTIVATED*\n\n"
+        f"✅ All active attacks stopped\n"
+        f"⚡ System cleared!",
+        parse_mode='Markdown'
     )
 
 # ===== REDEEM COMMAND =====
