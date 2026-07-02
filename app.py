@@ -1,9 +1,10 @@
-# app.py - SIMPLIFIED GURU BOT
+# app.py - SIMPLIFIED GURU BOT (FIXED)
 import os
 import logging
 import asyncio
 import threading
 import aiohttp
+import time  # <-- ADD THIS IMPORT
 import random
 import string
 from datetime import datetime, timedelta
