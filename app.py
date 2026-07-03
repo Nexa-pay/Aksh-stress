@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION
+# app.py - COMPLETE FIXED VERSION (ALL BUTTONS WORKING)
 import os
 import logging
 import asyncio
@@ -1450,7 +1450,9 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    user_id = int(query.data.split('_')[1])
+    # Get the user_id from callback data
+    data = query.data
+    user_id = int(data.split('_')[1])
     
     # Check if trying to demote owner
     if user_id == OWNER_ID:
@@ -1886,11 +1888,13 @@ def run_bot():
     app.add_handler(CommandHandler("cancel", cancel))
     
     # ===== CALLBACK QUERY HANDLERS =====
+    # Main
     app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
     app.add_handler(CallbackQueryHandler(my_plan_callback, pattern="^my_plan$"))
     app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
     
+    # Admin
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
     app.add_handler(CallbackQueryHandler(admin_gen_callback, pattern="^admin_gen$"))
     app.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
@@ -1898,6 +1902,7 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
     app.add_handler(CallbackQueryHandler(process_delete_callback, pattern="^del_"))
     
+    # Owner
     app.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
     app.add_handler(CallbackQueryHandler(owner_kill_switch_callback, pattern="^owner_kill$"))
     app.add_handler(CallbackQueryHandler(owner_promote_callback, pattern="^owner_promote$"))
