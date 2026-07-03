@@ -318,15 +318,12 @@ class Database:
         if not self.memory_mode:
             code_data = self.codes.find_one({"code": code, "is_used": False})
             if code_data:
-                # Mark code as used
                 self.codes.update_one(
                     {"code": code},
                     {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
                 )
-                # Calculate expiry
                 expiry = datetime.now() + timedelta(days=code_data['access_days'])
                 expiry_str = expiry.isoformat()
-                # Update user with premium plan
                 self.users.update_one(
                     {"user_id": user_id},
                     {"$set": {
@@ -1258,8 +1255,8 @@ async def admin_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         for c in codes[:20]:
             status = "✅" if not c.get('is_used') else f"❌ Used"
             used_by = f" by {c.get('used_by')}" if c.get('used_by') else ""
-            duration = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
-            text += f"`{c['code']}` - {duration} - {status}{used_by}\n"
+            duration_text = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
+            text += f"`{c['code']}` - {duration_text} - {status}{used_by}\n"
     
     await query.edit_message_text(
         text[:4000],
@@ -1311,7 +1308,6 @@ async def admin_remove_used_callback(update: Update, context: ContextTypes.DEFAU
         await query.answer("Access denied!", show_alert=True)
         return
     
-    # Count used codes
     used_codes = db.get_codes(only_unused=False)
     used_count = sum(1 for c in used_codes if c.get('is_used', False))
     
@@ -1521,13 +1517,11 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     logger.info(f"Demote callback received: {query.data}")
     
-    # Get the user_id from callback data
     data = query.data
     user_id = int(data.split('_')[1])
     
     logger.info(f"Demoting user: {user_id}")
     
-    # Check if trying to demote owner
     if user_id == OWNER_ID:
         await query.edit_message_text(
             "❌ Cannot demote the main owner!",
@@ -1535,7 +1529,6 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    # Check if trying to demote pseudo_owner
     admin_level = db.get_admin_level(user_id)
     if admin_level == "pseudo_owner":
         await query.edit_message_text(
@@ -1816,13 +1809,17 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result:
         expiry = datetime.now() + timedelta(days=result['access_days'])
         
+        # FIX: Calculate duration text separately to avoid nested f-string error
+        duration_text = "LIFETIME" if result['access_days'] >= 3650 else f"{result['access_days']} days"
+        expiry_text = "Never" if result['access_days'] >= 3650 else expiry.strftime('%Y-%m-%d %H:%M')
+        
         await update.message.reply_text(
             f"✅ *CODE REDEEMED!*\n\n"
             f"Code: `{code}`\n"
-            f"Duration: {'LIFETIME' if result['access_days'] >= 3650 else f'{result['access_days']} days'}\n"
+            f"Duration: {duration_text}\n"
             f"📊 Plan: PREMIUM\n"
             f"⚡ {MAX_CONCURRENT}x UDP: ENABLED\n"
-            f"📅 Expires: {'Never' if result['access_days'] >= 3650 else expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
+            f"📅 Expires: {expiry_text}\n\n"
             f"🎉 You now have premium access!\n"
             f"Use /start to begin attacking!",
             parse_mode='Markdown'
