@@ -131,20 +131,31 @@ class Database:
         plan = user.get("plan", "free")
         expiry = user.get("plan_expiry")
         
-        # Only check expiry if plan is premium
-        if plan == "premium" and expiry:
+        # If plan is free, return free
+        if plan == "free":
+            return "free", None
+        
+        # If plan is premium, check expiry
+        if plan == "premium":
+            # If no expiry, it's lifetime
+            if expiry is None:
+                return "premium", None
+            
+            # Handle string expiry
             if isinstance(expiry, str):
                 try:
                     expiry = datetime.fromisoformat(expiry)
                 except:
                     expiry = None
             
+            # Check if expired
             if expiry and isinstance(expiry, datetime):
                 if expiry < datetime.now():
                     plan = "free"
                     self.update_user_plan(user_id, "free", None)
                     expiry = None
             else:
+                # Invalid expiry - treat as free
                 plan = "free"
                 self.update_user_plan(user_id, "free", None)
                 expiry = None
@@ -153,6 +164,7 @@ class Database:
     
     def update_user_plan(self, user_id, plan, expiry):
         if not self.memory_mode:
+            # Convert datetime to string for MongoDB, or None for lifetime
             expiry_str = expiry.isoformat() if expiry and isinstance(expiry, datetime) else None
             result = self.users.update_one(
                 {"user_id": user_id},
@@ -203,7 +215,7 @@ class Database:
                 "added_by": added_by,
                 "added_at": datetime.now()
             })
-            self.update_user_plan(user_id, "premium", None)
+            self.update_user_plan(user_id, "premium", None)  # Lifetime premium
             return True
         else:
             if user_id in self.admins:
@@ -318,12 +330,15 @@ class Database:
         if not self.memory_mode:
             code_data = self.codes.find_one({"code": code, "is_used": False})
             if code_data:
+                # Mark code as used
                 self.codes.update_one(
                     {"code": code},
                     {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
                 )
+                # Calculate expiry
                 expiry = datetime.now() + timedelta(days=code_data['access_days'])
                 expiry_str = expiry.isoformat()
+                # Update user with premium plan
                 self.users.update_one(
                     {"user_id": user_id},
                     {"$set": {
@@ -1194,7 +1209,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("➕ GENERATE CODE", callback_data="admin_gen")],
         [InlineKeyboardButton("📋 LIST CODES", callback_data="admin_list")],
         [InlineKeyboardButton("🗑️ DELETE CODE", callback_data="admin_delete")],
-        [InlineKeyboardButton("🗑️ REMOVE USED CODES", callback_data="admin_remove_used")],
+        [InlineKeyboardButton("🗑️ DELETE USED CODES", callback_data="admin_delete_used")],
         [InlineKeyboardButton("📊 STATS", callback_data="stats")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
@@ -1232,10 +1247,11 @@ async def process_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
     
     if db.create_code(code, days, query.from_user.id):
+        duration_text = "LIFETIME" if days >= 3650 else f"{days} days"
         await query.edit_message_text(
             f"✅ *CODE GENERATED*\n\n"
             f"Code: `{code}`\n"
-            f"Duration: {days} days\n\n"
+            f"Duration: {duration_text}\n\n"
             f"Share this code with users!",
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
@@ -1298,8 +1314,8 @@ async def process_delete_callback(update: Update, context: ContextTypes.DEFAULT_
     else:
         await query.edit_message_text("❌ Failed to delete code!")
 
-# ===== REMOVE USED CODES =====
-async def admin_remove_used_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ===== DELETE USED CODES =====
+async def admin_delete_used_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
@@ -1308,49 +1324,52 @@ async def admin_remove_used_callback(update: Update, context: ContextTypes.DEFAU
         await query.answer("Access denied!", show_alert=True)
         return
     
-    used_codes = db.get_codes(only_unused=False)
-    used_count = sum(1 for c in used_codes if c.get('is_used', False))
+    codes = db.get_codes(only_unused=False)
+    used_codes = [c for c in codes if c.get('is_used', False)]
     
-    if used_count == 0:
+    if not used_codes:
         await query.edit_message_text(
-            "📋 No used codes to remove!\n\n"
+            "📋 No used codes to delete!\n\n"
             "All codes are unused.",
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
         )
         return
     
-    keyboard = [
-        [InlineKeyboardButton("✅ YES, REMOVE ALL", callback_data="remove_used_confirm")],
-        [InlineKeyboardButton("❌ CANCEL", callback_data="admin")]
-    ]
+    keyboard = []
+    for c in used_codes[:10]:
+        code = c['code']
+        used_by = c.get('used_by', 'Unknown')
+        duration_text = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
+        keyboard.append([InlineKeyboardButton(f"❌ {code} ({duration_text}) - Used by {used_by}", callback_data=f"del_used_{code}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="admin")])
     
     await query.edit_message_text(
-        f"⚠️ *REMOVE USED CODES*\n\n"
-        f"Found `{used_count}` used code(s).\n\n"
-        f"Are you sure you want to delete ALL used codes?\n"
-        f"This action cannot be undone!",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "🗑️ *DELETE USED CODES*\n\n"
+        "Select a used code to delete:\n\n"
+        f"Total used codes: {len(used_codes)}",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
     )
 
-async def process_remove_used(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_delete_used_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    user_id = query.from_user.id
-    if not db.is_admin(user_id):
-        await query.answer("Access denied!", show_alert=True)
-        return
+    code = query.data.replace('del_used_', '')
     
-    deleted = db.delete_used_codes()
-    
-    await query.edit_message_text(
-        f"✅ *USED CODES REMOVED!*\n\n"
-        f"Successfully deleted `{deleted}` used code(s).",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
-    )
+    if db.delete_code(code):
+        await query.edit_message_text(
+            f"✅ Code `{code}` deleted!",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
+    else:
+        await query.edit_message_text(
+            "❌ Failed to delete code!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
 
 # ===== OWNER PANEL =====
 async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1488,11 +1507,9 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
         admin_id = admin['user_id']
         level = admin.get('level', 'admin')
         
-        # Skip owner - cannot be demoted
         if admin_id == OWNER_ID:
             continue
         
-        # Skip pseudo_owner - cannot be demoted
         if level == "pseudo_owner":
             continue
         
@@ -1809,7 +1826,6 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result:
         expiry = datetime.now() + timedelta(days=result['access_days'])
         
-        # FIX: Calculate duration text separately to avoid nested f-string error
         duration_text = "LIFETIME" if result['access_days'] >= 3650 else f"{result['access_days']} days"
         expiry_text = "Never" if result['access_days'] >= 3650 else expiry.strftime('%Y-%m-%d %H:%M')
         
@@ -1939,9 +1955,9 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
     app.add_handler(CallbackQueryHandler(admin_list_callback, pattern="^admin_list$"))
     app.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
-    app.add_handler(CallbackQueryHandler(admin_remove_used_callback, pattern="^admin_remove_used$"))
-    app.add_handler(CallbackQueryHandler(process_remove_used, pattern="^remove_used_confirm$"))
+    app.add_handler(CallbackQueryHandler(admin_delete_used_callback, pattern="^admin_delete_used$"))
     app.add_handler(CallbackQueryHandler(process_delete_callback, pattern="^del_"))
+    app.add_handler(CallbackQueryHandler(process_delete_used_callback, pattern="^del_used_"))
     
     # Owner
     app.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
