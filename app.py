@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION (ALL BUTTONS WORKING)
+# app.py - COMPLETE FIXED VERSION
 import os
 import logging
 import asyncio
@@ -443,6 +443,7 @@ class AttackManager:
         self.current_attacker = None
         self.attack_start_time = None
         self.current_attack_duration = 0
+        self.attack_end_time = None  # Track when attack will end
     
     def get_cooldown_time(self, duration):
         cooldown = duration + 5
@@ -454,9 +455,16 @@ class AttackManager:
     
     def can_start_attack(self, user_id):
         with self.lock:
+            # GLOBAL COOLDOWN: Check if any attack is already running
             if self.global_attack_running:
-                return False, f"❌ Attack already running!\nUser: {self.current_attacker}\nPlease wait for it to finish."
+                remaining = 0
+                if self.attack_end_time:
+                    remaining = int((self.attack_end_time - datetime.now()).total_seconds())
+                    if remaining < 0:
+                        remaining = 0
+                return False, f"❌ Attack already running!\nUser: {self.current_attacker}\n⏳ Time remaining: {remaining}s"
             
+            # User cooldown based on last attack
             last_attack_time = db.get_last_attack_time(user_id)
             last_duration = db.get_last_attack_duration(user_id)
             
@@ -491,6 +499,7 @@ class AttackManager:
             self.current_attacker = user_id
             self.attack_start_time = datetime.now()
             self.current_attack_duration = duration
+            self.attack_end_time = datetime.now() + timedelta(seconds=duration + 5)  # Add buffer
             
             self.active_attacks[attack_id] = {
                 'id': attack_id,
@@ -514,6 +523,7 @@ class AttackManager:
                     self.global_attack_running = False
                     self.current_attacker = None
                     self.attack_start_time = None
+                    self.attack_end_time = None
                 return True
             return False
     
@@ -525,6 +535,7 @@ class AttackManager:
             self.global_attack_running = False
             self.current_attacker = None
             self.attack_start_time = None
+            self.attack_end_time = None
             return True
     
     def get_active_attacks(self, user_id=None):
@@ -536,6 +547,11 @@ class AttackManager:
     def get_stats(self):
         with self.lock:
             active = len([a for a in self.active_attacks.values() if a['status'] == 'running'])
+            remaining = 0
+            if self.attack_end_time:
+                remaining = int((self.attack_end_time - datetime.now()).total_seconds())
+                if remaining < 0:
+                    remaining = 0
             return {
                 'active': active,
                 'concurrent_busy': self.concurrent_busy,
@@ -544,7 +560,8 @@ class AttackManager:
                 'is_running': self.global_attack_running,
                 'current_user': self.current_attacker,
                 'start_time': self.attack_start_time,
-                'duration': self.current_attack_duration
+                'duration': self.current_attack_duration,
+                'remaining': remaining
             }
     
     def cleanup(self):
@@ -563,6 +580,7 @@ class AttackManager:
                 self.global_attack_running = False
                 self.current_attacker = None
                 self.attack_start_time = None
+                self.attack_end_time = None
             return len(to_remove)
 
 attack_manager = AttackManager()
@@ -687,6 +705,7 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
         f"⏱️ Duration: `{duration}s`\n"
         f"✅ Successful: `{success_count}/{MAX_CONCURRENT}`\n"
         f"⚡ Status: {'✅ COMPLETED' if success_count > 0 else '❌ FAILED'}\n\n"
+        f"⏳ Cooldown: {cooldown}s\n"
         f"⏳ Next attack available in: `{cooldown}s`"
     )
     
@@ -792,7 +811,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     attack_status = ""
     if stats['is_running']:
-        attack_status = f"\n⚠️ *Attack in progress by another user!*\nPlease wait..."
+        attack_status = f"\n⚠️ *Attack in progress by another user!*\n⏳ Time remaining: {stats['remaining']}s"
     
     cooldown_status = ""
     last_attack_time = db.get_last_attack_time(user_id)
@@ -1136,6 +1155,7 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎫 Redeem Codes: {len(codes)}\n"
         f"⚡ Active Attacks: {stats['active']}/{stats['max']}\n"
         f"⚡ Attack Status: {attack_status}\n"
+        f"⏳ Remaining: {stats['remaining']}s\n"
         f"⚡ {MAX_CONCURRENT}x UDP: ENABLED\n"
         f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
         f"🌐 Status: ONLINE"
@@ -1809,6 +1829,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📈 Total Attacks: {stats['total']}\n"
         f"👥 Users: {len(users)}\n"
         f"⚡ Attack Status: {attack_status}\n"
+        f"⏳ Remaining: {stats['remaining']}s\n"
         f"🎯 Method: UDP\n"
         f"⚡ {MAX_CONCURRENT}x Concurrent\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
@@ -1845,7 +1866,7 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     welcome_back = f"👋 *WELCOME BACK*"
     if stats['is_running']:
-        welcome_back += f"\n\n⚠️ *Attack in progress by another user!*\nPlease wait..."
+        welcome_back += f"\n\n⚠️ *Attack in progress by another user!*\n⏳ Time remaining: {stats['remaining']}s"
     
     await query.edit_message_text(
         welcome_back,
