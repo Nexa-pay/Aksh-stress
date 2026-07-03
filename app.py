@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION
+# app.py - COMPLETE FIXED VERSION (NO KILL SWITCH)
 import os
 import logging
 import asyncio
@@ -443,7 +443,7 @@ class AttackManager:
         self.current_attacker = None
         self.attack_start_time = None
         self.current_attack_duration = 0
-        self.attack_end_time = None  # Track when attack will end
+        self.attack_end_time = None
     
     def get_cooldown_time(self, duration):
         cooldown = duration + 5
@@ -455,7 +455,6 @@ class AttackManager:
     
     def can_start_attack(self, user_id):
         with self.lock:
-            # GLOBAL COOLDOWN: Check if any attack is already running
             if self.global_attack_running:
                 remaining = 0
                 if self.attack_end_time:
@@ -464,7 +463,6 @@ class AttackManager:
                         remaining = 0
                 return False, f"❌ Attack already running!\nUser: {self.current_attacker}\n⏳ Time remaining: {remaining}s"
             
-            # User cooldown based on last attack
             last_attack_time = db.get_last_attack_time(user_id)
             last_duration = db.get_last_attack_duration(user_id)
             
@@ -499,7 +497,7 @@ class AttackManager:
             self.current_attacker = user_id
             self.attack_start_time = datetime.now()
             self.current_attack_duration = duration
-            self.attack_end_time = datetime.now() + timedelta(seconds=duration + 5)  # Add buffer
+            self.attack_end_time = datetime.now() + timedelta(seconds=duration + 5)
             
             self.active_attacks[attack_id] = {
                 'id': attack_id,
@@ -526,17 +524,6 @@ class AttackManager:
                     self.attack_end_time = None
                 return True
             return False
-    
-    def stop_all_attacks(self):
-        with self.lock:
-            for aid in list(self.active_attacks.keys()):
-                self.active_attacks[aid]['status'] = 'stopped'
-            self.concurrent_busy = 0
-            self.global_attack_running = False
-            self.current_attacker = None
-            self.attack_start_time = None
-            self.attack_end_time = None
-            return True
     
     def get_active_attacks(self, user_id=None):
         with self.lock:
@@ -1290,13 +1277,11 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = query.from_user.id
     
-    # Check if user is owner OR pseudo_owner (both have same power)
     if not db.is_owner_or_pseudo(user_id):
         await query.answer("Access denied! Only Owner and Pseudo_Owner can access this.", show_alert=True)
         return
     
     keyboard = [
-        [InlineKeyboardButton("🛑 KILL SWITCH", callback_data="owner_kill")],
         [InlineKeyboardButton("👑 PROMOTE ADMIN", callback_data="owner_promote")],
         [InlineKeyboardButton("👑 DEMOTE ADMIN", callback_data="owner_demote")],
         [InlineKeyboardButton("🚫 BAN USER", callback_data="owner_ban")],
@@ -1594,6 +1579,7 @@ async def process_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['awaiting_unban'] = False
 
+# ===== LIST ADMINS =====
 async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1718,41 +1704,6 @@ async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
         text[:4000],
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
-
-async def owner_kill_switch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    if not db.is_owner_or_pseudo(user_id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    attack_manager.stop_all_attacks()
-    
-    await query.edit_message_text(
-        f"🛑 *KILL SWITCH ACTIVATED*\n\n"
-        f"✅ All active attacks stopped\n"
-        f"⚡ System cleared!",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-    )
-
-async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    if not db.is_owner_or_pseudo(user_id):
-        await update.message.reply_text("❌ Only Owner/Pseudo Owner can use this command!")
-        return
-    
-    attack_manager.stop_all_attacks()
-    
-    await update.message.reply_text(
-        f"🛑 *KILL SWITCH ACTIVATED*\n\n"
-        f"✅ All active attacks stopped\n"
-        f"⚡ System cleared!",
-        parse_mode='Markdown'
     )
 
 # ===== REDEEM COMMAND =====
@@ -1904,7 +1855,6 @@ def run_bot():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("attack", attack_command))
     app.add_handler(CommandHandler("redeem", redeem_command))
-    app.add_handler(CommandHandler("kill", kill_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("cancel", cancel))
     
@@ -1925,7 +1875,6 @@ def run_bot():
     
     # Owner
     app.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
-    app.add_handler(CallbackQueryHandler(owner_kill_switch_callback, pattern="^owner_kill$"))
     app.add_handler(CallbackQueryHandler(owner_promote_callback, pattern="^owner_promote$"))
     app.add_handler(CallbackQueryHandler(owner_demote_callback, pattern="^owner_demote$"))
     app.add_handler(CallbackQueryHandler(owner_ban_callback, pattern="^owner_ban$"))
