@@ -145,20 +145,26 @@ class Database:
             if isinstance(expiry, str):
                 try:
                     expiry = datetime.fromisoformat(expiry)
-                except:
+                except Exception as e:
+                    logger.error(f"Error parsing expiry: {e}")
                     expiry = None
             
             # Check if expired
             if expiry and isinstance(expiry, datetime):
                 if expiry < datetime.now():
+                    # Plan expired - set to free
                     plan = "free"
                     self.update_user_plan(user_id, "free", None)
                     expiry = None
+                    return "free", None
+                else:
+                    # Plan is still valid
+                    return "premium", expiry
             else:
-                # Invalid expiry - treat as free
+                # No valid expiry - treat as free
                 plan = "free"
                 self.update_user_plan(user_id, "free", None)
-                expiry = None
+                return "free", None
         
         return plan, expiry
     
@@ -170,6 +176,7 @@ class Database:
                 {"user_id": user_id},
                 {"$set": {"plan": plan, "plan_expiry": expiry_str}}
             )
+            logger.info(f"Updated user {user_id} plan to {plan}, expiry: {expiry_str}")
             return result.modified_count > 0
         else:
             if user_id in self.users:
@@ -336,9 +343,14 @@ class Database:
                     {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
                 )
                 # Calculate expiry
-                expiry = datetime.now() + timedelta(days=code_data['access_days'])
-                expiry_str = expiry.isoformat()
+                days = code_data['access_days']
+                if days >= 3650:  # Lifetime
+                    expiry = None
+                else:
+                    expiry = datetime.now() + timedelta(days=days)
+                
                 # Update user with premium plan
+                expiry_str = expiry.isoformat() if expiry else None
                 self.users.update_one(
                     {"user_id": user_id},
                     {"$set": {
@@ -349,6 +361,7 @@ class Database:
                         "redeem_date": datetime.now().isoformat()
                     }}
                 )
+                logger.info(f"User {user_id} redeemed code {code} - Plan: premium, Expiry: {expiry_str}")
                 return code_data
         else:
             if code in self.codes and not self.codes[code]["is_used"]:
@@ -821,7 +834,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin = db.is_admin(user_id)
     is_owner = db.is_owner_or_pseudo(user_id)
     
-    logger.info(f"User {user_id} - Plan: {plan}, Is Admin: {is_admin}, Is Owner: {is_owner}")
+    logger.info(f"User {user_id} - Plan: {plan}, Expiry: {expiry}, Is Admin: {is_admin}, Is Owner: {is_owner}")
     
     total_attacks = db.get_user_stats(user_id)
     stats = attack_manager.get_stats()
@@ -1208,7 +1221,7 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("➕ GENERATE CODE", callback_data="admin_gen")],
         [InlineKeyboardButton("📋 LIST CODES", callback_data="admin_list")],
-        [InlineKeyboardButton("🗑️ DELETE CODE", callback_data="admin_delete")],
+        [InlineKeyboardButton("🗑️ DELETE UNUSED CODE", callback_data="admin_delete")],
         [InlineKeyboardButton("🗑️ DELETE USED CODES", callback_data="admin_delete_used")],
         [InlineKeyboardButton("📊 STATS", callback_data="stats")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
@@ -1230,6 +1243,7 @@ async def admin_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("📅 7 DAYS", callback_data="gen_7d")],
         [InlineKeyboardButton("📅 30 DAYS", callback_data="gen_30d")],
         [InlineKeyboardButton("📅 90 DAYS", callback_data="gen_90d")],
+        [InlineKeyboardButton("📅 LIFETIME", callback_data="gen_lifetime")],
         [InlineKeyboardButton("🔙 BACK", callback_data="admin")]
     ]
     
@@ -1243,7 +1257,12 @@ async def process_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    days = int(query.data.split('_')[1].replace('d', ''))
+    data = query.data.split('_')[1]
+    if data == "lifetime":
+        days = 3650
+    else:
+        days = int(data.replace('d', ''))
+    
     code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=12))
     
     if db.create_code(code, days, query.from_user.id):
@@ -1291,11 +1310,13 @@ async def admin_delete_callback(update: Update, context: ContextTypes.DEFAULT_TY
     
     keyboard = []
     for c in codes[:10]:
-        keyboard.append([InlineKeyboardButton(f"❌ {c['code']}", callback_data=f"del_{c['code']}")])
+        code = c['code']
+        duration_text = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
+        keyboard.append([InlineKeyboardButton(f"❌ {code} ({duration_text})", callback_data=f"del_{code}")])
     keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="admin")])
     
     await query.edit_message_text(
-        "🗑️ *DELETE CODE*\n\nSelect code to delete:",
+        "🗑️ *DELETE UNUSED CODE*\n\nSelect a code to delete:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -1304,7 +1325,7 @@ async def process_delete_callback(update: Update, context: ContextTypes.DEFAULT_
     query = update.callback_query
     await query.answer()
     
-    code = query.data.split('_')[1]
+    code = query.data.replace('del_', '')
     if db.delete_code(code):
         await query.edit_message_text(
             f"✅ Code `{code}` deleted!",
@@ -1312,7 +1333,10 @@ async def process_delete_callback(update: Update, context: ContextTypes.DEFAULT_
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
         )
     else:
-        await query.edit_message_text("❌ Failed to delete code!")
+        await query.edit_message_text(
+            "❌ Failed to delete code!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
 
 # ===== DELETE USED CODES =====
 async def admin_delete_used_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1358,10 +1382,9 @@ async def process_delete_used_callback(update: Update, context: ContextTypes.DEF
     await query.answer()
     
     code = query.data.replace('del_used_', '')
-    
     if db.delete_code(code):
         await query.edit_message_text(
-            f"✅ Code `{code}` deleted!",
+            f"✅ Used code `{code}` deleted!",
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
         )
@@ -1805,6 +1828,7 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     code = args[0].upper()
     
+    # Check if user already redeemed
     user = db.get_user(user_id)
     if user and user.get('has_used_code'):
         plan, expiry = db.get_user_plan(user_id)
@@ -1824,10 +1848,11 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     result = db.use_code(code, user_id)
     
     if result:
-        expiry = datetime.now() + timedelta(days=result['access_days'])
+        # Get the updated user plan
+        plan, expiry = db.get_user_plan(user_id)
         
         duration_text = "LIFETIME" if result['access_days'] >= 3650 else f"{result['access_days']} days"
-        expiry_text = "Never" if result['access_days'] >= 3650 else expiry.strftime('%Y-%m-%d %H:%M')
+        expiry_text = "Never" if result['access_days'] >= 3650 else (expiry.strftime('%Y-%m-%d %H:%M') if expiry else "Never")
         
         await update.message.reply_text(
             f"✅ *CODE REDEEMED!*\n\n"
@@ -1842,7 +1867,7 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         
         verify = db.get_user(user_id)
-        logger.info(f"User {user_id} after redeem - Plan: {verify.get('plan') if verify else 'None'}")
+        logger.info(f"User {user_id} after redeem - Plan: {verify.get('plan') if verify else 'None'}, Expiry: {verify.get('plan_expiry') if verify else 'None'}")
         
     else:
         await update.message.reply_text(
