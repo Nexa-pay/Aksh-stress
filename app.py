@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION (NO KILL SWITCH)
+# app.py - COMPLETE FIXED VERSION
 import os
 import logging
 import asyncio
@@ -1347,13 +1347,12 @@ async def owner_promote_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("Access denied!", show_alert=True)
         return
     
+    # REMOVED PSEUDO_OWNER OPTION - Only admin role available
     await query.edit_message_text(
         "👑 *PROMOTE ADMIN*\n\n"
-        "Choose role:\n"
-        "1. `admin` - Standard admin\n"
-        "2. `pseudo_owner` - Same as owner\n\n"
-        "Send: `USER_ID ROLE`\n"
-        "Example: `123456789 pseudo_owner`\n\n"
+        "Send: `USER_ID`\n"
+        "Example: `123456789`\n\n"
+        "User will be promoted to ADMIN with LIFETIME premium access.\n\n"
         "Send /cancel to cancel",
         parse_mode='Markdown'
     )
@@ -1369,17 +1368,7 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     try:
-        parts = update.message.text.split()
-        if len(parts) < 2:
-            await update.message.reply_text("❌ Use: `USER_ID ROLE`\nExample: `123456789 pseudo_owner`")
-            return
-        
-        user_id = int(parts[0])
-        level = parts[1].lower() if len(parts) > 1 else "admin"
-        
-        if level not in ["admin", "pseudo_owner"]:
-            await update.message.reply_text("❌ Invalid role! Use: admin or pseudo_owner")
-            return
+        user_id = int(update.message.text.strip())
         
         user = db.get_user(user_id)
         if not user:
@@ -1392,17 +1381,18 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         username = user.get('username', 'Unknown')
         
-        if db.add_admin(user_id, username, level, update.effective_user.id):
+        # Add as admin (level is always "admin")
+        if db.add_admin(user_id, username, "admin", update.effective_user.id):
             await update.message.reply_text(
                 f"✅ *ADMIN PROMOTED!*\n\n"
-                f"User `{user_id}` is now {level.upper()}!\n"
+                f"User `{user_id}` is now an ADMIN!\n"
                 f"They now have LIFETIME premium access.",
                 parse_mode='Markdown'
             )
         else:
             await update.message.reply_text("❌ Failed to promote user!", parse_mode='Markdown')
     except ValueError:
-        await update.message.reply_text("❌ Invalid format! Use: `USER_ID ROLE`")
+        await update.message.reply_text("❌ Invalid format! Use: `USER_ID`\nExample: `123456789`")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
     
@@ -1433,7 +1423,7 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
         if level == "pseudo_owner":
             continue
         
-        keyboard.append([InlineKeyboardButton(f"❌ {admin_id} ({level})", callback_data=f"demote_{admin_id}")])
+        keyboard.append([InlineKeyboardButton(f"❌ {admin_id}", callback_data=f"demote_{admin_id}")])
     
     keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="owner")])
     
@@ -1446,7 +1436,7 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     
     await query.edit_message_text(
-        "👑 *DEMOTE ADMIN*\n\nSelect admin to demote:\n(Note: Owner and Pseudo_Owner cannot be demoted)",
+        "👑 *DEMOTE ADMIN*\n\nClick an admin to demote:\n(Note: Owner and Pseudo_Owner cannot be demoted)",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -1455,9 +1445,13 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
+    logger.info(f"Demote callback received: {query.data}")
+    
     # Get the user_id from callback data
     data = query.data
     user_id = int(data.split('_')[1])
+    
+    logger.info(f"Demoting user: {user_id}")
     
     # Check if trying to demote owner
     if user_id == OWNER_ID:
@@ -1588,6 +1582,8 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
     if not db.is_owner_or_pseudo(user_id):
         await query.answer("Access denied!", show_alert=True)
         return
+    
+    logger.info(f"List admins called by user: {user_id}")
     
     admins = db.get_admins()
     if not admins:
