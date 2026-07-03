@@ -1295,9 +1295,8 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     
     await query.edit_message_text(
-        f"👑 *OWNER PANEL*\n\nSelect action:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
+        "👑 OWNER PANEL\n\nSelect action:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 # ===== API STATUS =====
@@ -1310,15 +1309,12 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Access denied!", show_alert=True)
         return
     
-    await query.edit_message_text(
-        "🔌 *Checking API Status...*\n\nPlease wait...",
-        parse_mode='Markdown'
-    )
+    await query.edit_message_text("🔌 Checking API Status...\n\nPlease wait...")
     
     status, message = await check_api_status()
     
     status_text = (
-        f"🔌 *API STATUS*\n\n"
+        f"🔌 API STATUS\n\n"
         f"{message}\n\n"
         f"📊 API Key: {'✅ Set' if API_KEY else '❌ Missing'}\n"
         f"🔄 Method: UDP\n"
@@ -1330,7 +1326,6 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(
         status_text,
-        parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 REFRESH", callback_data="owner_api_status")],
             [InlineKeyboardButton("🔙 BACK", callback_data="owner")]
@@ -1348,12 +1343,11 @@ async def owner_promote_callback(update: Update, context: ContextTypes.DEFAULT_T
         return
     
     await query.edit_message_text(
-        "👑 *PROMOTE ADMIN*\n\n"
-        "Send: `USER_ID`\n"
-        "Example: `123456789`\n\n"
+        "👑 PROMOTE ADMIN\n\n"
+        "Send: USER_ID\n"
+        "Example: 123456789\n\n"
         "User will be promoted to ADMIN with LIFETIME premium access.\n\n"
-        "Send /cancel to cancel",
-        parse_mode='Markdown'
+        "Send /cancel to cancel"
     )
     context.user_data['awaiting_promote'] = True
 
@@ -1371,26 +1365,25 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         user = db.get_user(user_id)
         if not user:
-            await update.message.reply_text(f"❌ User `{user_id}` not found. They need to start the bot first.", parse_mode='Markdown')
+            await update.message.reply_text(f"❌ User {user_id} not found. They need to start the bot first.")
             return
         
         if db.is_admin(user_id):
-            await update.message.reply_text(f"❌ User `{user_id}` is already an admin!", parse_mode='Markdown')
+            await update.message.reply_text(f"❌ User {user_id} is already an admin!")
             return
         
         username = user.get('username', 'Unknown')
         
         if db.add_admin(user_id, username, "admin", update.effective_user.id):
             await update.message.reply_text(
-                f"✅ *ADMIN PROMOTED!*\n\n"
-                f"User `{user_id}` is now an ADMIN!\n"
-                f"They now have LIFETIME premium access.",
-                parse_mode='Markdown'
+                f"✅ ADMIN PROMOTED!\n\n"
+                f"User {user_id} is now an ADMIN!\n"
+                f"They now have LIFETIME premium access."
             )
         else:
-            await update.message.reply_text("❌ Failed to promote user!", parse_mode='Markdown')
+            await update.message.reply_text("❌ Failed to promote user!")
     except ValueError:
-        await update.message.reply_text("❌ Invalid format! Use: `USER_ID`\nExample: `123456789`")
+        await update.message.reply_text("❌ Invalid format! Use: USER_ID\nExample: 123456789")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
     
@@ -1427,16 +1420,13 @@ async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TY
     
     if not keyboard:
         await query.edit_message_text(
-            "👑 *DEMOTE ADMIN*\n\nNo admins to demote!\n\n"
-            "📌 Note: Owner and Pseudo_Owner cannot be demoted.",
-            parse_mode='Markdown'
+            "👑 DEMOTE ADMIN\n\nNo admins to demote!\n\nNote: Owner and Pseudo_Owner cannot be demoted."
         )
         return
     
     await query.edit_message_text(
-        "👑 *DEMOTE ADMIN*\n\nClick an admin to demote:\n(Note: Owner and Pseudo_Owner cannot be demoted)",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
+        "👑 DEMOTE ADMIN\n\nClick an admin to demote:\n(Note: Owner and Pseudo_Owner cannot be demoted)",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1455,7 +1445,6 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id == OWNER_ID:
         await query.edit_message_text(
             "❌ Cannot demote the main owner!",
-            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
         )
         return
@@ -1465,21 +1454,18 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if admin_level == "pseudo_owner":
         await query.edit_message_text(
             "❌ Cannot demote Pseudo_Owner! They have the same power as Owner.",
-            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
         )
         return
     
     if db.remove_admin(user_id):
         await query.edit_message_text(
-            f"✅ Admin `{user_id}` demoted!",
-            parse_mode='Markdown',
+            f"✅ Admin {user_id} demoted!",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
         )
     else:
         await query.edit_message_text(
             "❌ Failed to demote admin!",
-            parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
         )
 
@@ -1494,12 +1480,11 @@ async def owner_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     
     await query.edit_message_text(
-        "🚫 *BAN USER*\n\n"
-        "Send user ID to ban:\n`123456789`\n\n"
+        "🚫 BAN USER\n\n"
+        "Send user ID to ban:\n123456789\n\n"
         "Optional: Add reason\n"
-        "Example: `123456789 Spamming`\n\n"
-        "Send /cancel to cancel",
-        parse_mode='Markdown'
+        "Example: 123456789 Spamming\n\n"
+        "Send /cancel to cancel"
     )
     context.user_data['awaiting_ban'] = True
 
@@ -1535,9 +1520,8 @@ async def process_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         db.ban_user(user_id, reason, update.effective_user.id)
         await update.message.reply_text(
-            f"✅ User `{user_id}` banned!\n"
-            f"Reason: {reason}",
-            parse_mode='Markdown'
+            f"✅ User {user_id} banned!\n"
+            f"Reason: {reason}"
         )
     except ValueError:
         await update.message.reply_text("❌ Invalid user ID!")
@@ -1556,10 +1540,9 @@ async def owner_unban_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     
     await query.edit_message_text(
-        "✅ *UNBAN USER*\n\n"
-        "Send user ID to unban:\n`123456789`\n\n"
-        "Send /cancel to cancel",
-        parse_mode='Markdown'
+        "✅ UNBAN USER\n\n"
+        "Send user ID to unban:\n123456789\n\n"
+        "Send /cancel to cancel"
     )
     context.user_data['awaiting_unban'] = True
 
@@ -1575,7 +1558,7 @@ async def process_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         user_id = int(update.message.text.strip())
         db.unban_user(user_id)
-        await update.message.reply_text(f"✅ User `{user_id}` unbanned!", parse_mode='Markdown')
+        await update.message.reply_text(f"✅ User {user_id} unbanned!")
     except ValueError:
         await update.message.reply_text("❌ Invalid user ID!")
     except Exception as e:
@@ -1597,26 +1580,20 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
     
     admins = db.get_admins()
     if not admins:
-        await query.edit_message_text(
-            "👑 *ADMIN LIST*\n\nNo admins found.",
-            parse_mode='Markdown'
-        )
+        await query.edit_message_text("👑 ADMIN LIST\n\nNo admins found.")
         return
     
-    text = "👑 *ADMIN LIST*\n\n"
+    text = "👑 ADMIN LIST\n\n"
     for admin in admins:
         level = admin.get('level', 'admin').upper()
         admin_id = admin['user_id']
         is_owner = "⭐ " if admin_id == OWNER_ID else ""
         is_pseudo = "🔱 " if level == "PSEUDO_OWNER" else ""
         username = admin.get('username', 'Unknown')
-        # Escape special characters to prevent Markdown errors
-        username = str(username).replace('_', '\\_').replace('*', '\\*').replace('`', '\\`').replace('[', '\\[').replace(']', '\\]')
-        text += f"{is_owner}{is_pseudo}• `{admin_id}` - {level} (@{username})\n"
+        text += f"{is_owner}{is_pseudo}• {admin_id} - {level} (@{username})\n"
     
     await query.edit_message_text(
         text,
-        parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
@@ -1635,7 +1612,7 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
         await query.edit_message_text("📋 No users found.")
         return
     
-    text = "👥 *ALL USERS*\n\n"
+    text = "👥 ALL USERS\n\n"
     for user in users[:50]:
         user_id2 = user.get('user_id')
         username = user.get('username', 'N/A')
@@ -1674,7 +1651,7 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
         
         is_banned = "🚫" if user.get('is_banned') else "✅"
         is_admin = "⭐" if db.is_admin(user_id2) else ""
-        text += f"{is_banned} {is_admin} `{user_id2}` - @{username}\n"
+        text += f"{is_banned} {is_admin} {user_id2} - @{username}\n"
         text += f"   📊 {plan} | ⏱️ {expiry_text}{cooldown_info}\n\n"
     
     if len(users) > 50:
@@ -1682,7 +1659,6 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
     
     await query.edit_message_text(
         text[:4000],
-        parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
@@ -1700,20 +1676,19 @@ async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("🚫 No banned users.")
         return
     
-    text = "🚫 *BANNED USERS*\n\n"
+    text = "🚫 BANNED USERS\n\n"
     for user in banned[:20]:
         user_id2 = user.get('user_id')
         username = user.get('username', 'N/A')
         reason = user.get('ban_reason', 'No reason')
         banned_at = user.get('banned_at')
         banned_at_str = banned_at.strftime('%Y-%m-%d') if banned_at else 'N/A'
-        text += f"• `{user_id2}` - @{username}\n"
+        text += f"• {user_id2} - @{username}\n"
         text += f"  Reason: {reason}\n"
         text += f"  Banned: {banned_at_str}\n\n"
     
     await query.edit_message_text(
         text[:4000],
-        parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
@@ -1826,14 +1801,13 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_owner:
         keyboard.append([InlineKeyboardButton("👑 OWNER", callback_data="owner")])
     
-    welcome_back = f"👋 *WELCOME BACK*"
+    welcome_back = f"👋 WELCOME BACK"
     if stats['is_running']:
-        welcome_back += f"\n\n⚠️ *Attack in progress by another user!*\n⏳ Time remaining: {stats['remaining']}s"
+        welcome_back += f"\n\n⚠️ Attack in progress by another user!\n⏳ Time remaining: {stats['remaining']}s"
     
     await query.edit_message_text(
         welcome_back,
-        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None,
-        parse_mode='Markdown'
+        reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
     )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
