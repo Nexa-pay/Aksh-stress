@@ -1347,7 +1347,6 @@ async def owner_promote_callback(update: Update, context: ContextTypes.DEFAULT_T
         await query.answer("Access denied!", show_alert=True)
         return
     
-    # REMOVED PSEUDO_OWNER OPTION - Only admin role available
     await query.edit_message_text(
         "👑 *PROMOTE ADMIN*\n\n"
         "Send: `USER_ID`\n"
@@ -1381,7 +1380,6 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         username = user.get('username', 'Unknown')
         
-        # Add as admin (level is always "admin")
         if db.add_admin(user_id, username, "admin", update.effective_user.id):
             await update.message.reply_text(
                 f"✅ *ADMIN PROMOTED!*\n\n"
@@ -1455,13 +1453,21 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if trying to demote owner
     if user_id == OWNER_ID:
-        await query.edit_message_text("❌ Cannot demote the main owner!")
+        await query.edit_message_text(
+            "❌ Cannot demote the main owner!",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+        )
         return
     
     # Check if trying to demote pseudo_owner
     admin_level = db.get_admin_level(user_id)
     if admin_level == "pseudo_owner":
-        await query.edit_message_text("❌ Cannot demote Pseudo_Owner! They have the same power as Owner.")
+        await query.edit_message_text(
+            "❌ Cannot demote Pseudo_Owner! They have the same power as Owner.",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+        )
         return
     
     if db.remove_admin(user_id):
@@ -1471,7 +1477,11 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
         )
     else:
-        await query.edit_message_text("❌ Failed to demote admin!")
+        await query.edit_message_text(
+            "❌ Failed to demote admin!",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+        )
 
 # ===== BAN/UNBAN FUNCTIONS =====
 async def owner_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1587,7 +1597,10 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
     
     admins = db.get_admins()
     if not admins:
-        await query.edit_message_text("👑 *ADMIN LIST*\n\nNo admins found.", parse_mode='Markdown')
+        await query.edit_message_text(
+            "👑 *ADMIN LIST*\n\nNo admins found.",
+            parse_mode='Markdown'
+        )
         return
     
     text = "👑 *ADMIN LIST*\n\n"
@@ -1597,6 +1610,8 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
         is_owner = "⭐ " if admin_id == OWNER_ID else ""
         is_pseudo = "🔱 " if level == "PSEUDO_OWNER" else ""
         username = admin.get('username', 'Unknown')
+        # Escape special characters to prevent Markdown errors
+        username = str(username).replace('_', '\\_').replace('*', '\\*').replace('`', '\\`').replace('[', '\\[').replace(']', '\\]')
         text += f"{is_owner}{is_pseudo}• `{admin_id}` - {level} (@{username})\n"
     
     await query.edit_message_text(
