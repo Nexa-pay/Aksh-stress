@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION WITH PROPER REDEEM CODE PERSISTENCE AND FIXED DELETE FUNCTIONS
+# app.py - COMPLETE FIXED VERSION WITH USER REVOCATION ON DELETE
 import os
 import logging
 import asyncio
@@ -451,6 +451,39 @@ class Database:
                     self.users[user_id]["redeem_date"] = datetime.now()
                     return code_data
         return None
+    
+    def get_user_by_code(self, code):
+        """Find which user used a specific code"""
+        if not self.memory_mode:
+            return self.users.find_one({"code_used": code})
+        else:
+            for user in self.users.values():
+                if user.get('code_used') == code:
+                    return user
+        return None
+
+    def revoke_user_plan_by_code(self, code):
+        """Revoke premium plan from user who used a specific code"""
+        user = self.get_user_by_code(code)
+        if user:
+            user_id = user['user_id']
+            # Only revoke if it's not an admin (admins keep lifetime premium)
+            if not self.is_admin(user_id):
+                self.update_user_plan(user_id, "free", None)
+                logger.info(f"✅ Revoked premium from user {user_id} after code {code} was deleted")
+                return True
+            else:
+                logger.info(f"⚠️ Admin {user_id} used code {code}, keeping premium")
+                return False
+        return False
+
+    def revoke_all_users_by_codes(self, codes):
+        """Revoke premium from all users who used the given codes"""
+        revoked = 0
+        for code in codes:
+            if self.revoke_user_plan_by_code(code):
+                revoked += 1
+        return revoked
     
     def get_codes(self, only_unused=False):
         if not self.memory_mode:
@@ -1374,7 +1407,7 @@ async def admin_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
     )
 
-# ===== DELETE FUNCTIONS - COMPLETELY FIXED =====
+# ===== DELETE FUNCTIONS - COMPLETELY FIXED WITH USER REVOCATION =====
 async def admin_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show unused codes to delete"""
     query = update.callback_query
@@ -1411,7 +1444,7 @@ async def admin_delete_callback(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 async def admin_delete_used_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show used codes to delete"""
+    """Show used codes to delete with user info"""
     query = update.callback_query
     await query.answer()
     
@@ -1437,13 +1470,22 @@ async def admin_delete_used_callback(update: Update, context: ContextTypes.DEFAU
         code = c['code']
         used_by = c.get('used_by', 'Unknown')
         duration_text = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
-        keyboard.append([InlineKeyboardButton(f"❌ {code} ({duration_text})", callback_data=f"delused_{code}")])
+        
+        # Get user info
+        user = db.get_user(used_by)
+        username = f"@{user.get('username', 'Unknown')}" if user else "Unknown"
+        
+        keyboard.append([InlineKeyboardButton(
+            f"❌ {code} ({duration_text}) - Used by {used_by} {username}", 
+            callback_data=f"delused_{code}"
+        )])
     
-    keyboard.append([InlineKeyboardButton("🗑️ DELETE ALL USED", callback_data="delallused")])
+    keyboard.append([InlineKeyboardButton("🗑️ DELETE ALL USED (REVOKE ALL)", callback_data="delallused")])
     keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="admin")])
     
     await query.edit_message_text(
         "🗑️ *DELETE USED CODES*\n\n"
+        "⚠️ *Warning:* Deleting a used code will also revoke the user's premium plan!\n\n"
         "Select a used code to delete:\n\n"
         f"Total used codes: {len(used_codes)}",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1451,7 +1493,7 @@ async def admin_delete_used_callback(update: Update, context: ContextTypes.DEFAU
     )
 
 async def process_delete_unused_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process delete unused code"""
+    """Process delete unused code - No user revocation needed since codes are unused"""
     query = update.callback_query
     await query.answer()
     
@@ -1486,21 +1528,30 @@ async def process_delete_unused_callback(update: Update, context: ContextTypes.D
         )
 
 async def process_delete_used_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process delete used code"""
+    """Process delete used code - Revoke user's premium plan"""
     query = update.callback_query
     await query.answer()
     
     data = query.data
     
     if data == "delallused":
-        # Delete all used codes
+        # Delete all used codes and revoke plans
         used_codes = [c for c in db.get_codes(only_unused=False) if c.get('is_used', False)]
+        revoked = 0
         deleted = 0
+        
         for c in used_codes:
-            if db.delete_code(c['code']):
+            code = c['code']
+            # Revoke user's plan
+            if db.revoke_user_plan_by_code(code):
+                revoked += 1
+            # Delete the code
+            if db.delete_code(code):
                 deleted += 1
+        
         await query.edit_message_text(
-            f"✅ Deleted {deleted} used codes!",
+            f"✅ Deleted {deleted} used codes!\n"
+            f"👤 Revoked premium from {revoked} users!",
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
         )
@@ -1508,9 +1559,20 @@ async def process_delete_used_callback(update: Update, context: ContextTypes.DEF
     
     # Delete single used code
     code = data.replace('delused_', '')
+    
+    # First revoke user's plan
+    revoked = db.revoke_user_plan_by_code(code)
+    
+    # Then delete the code
     if db.delete_code(code):
+        message = f"✅ Used code `{code}` deleted!\n"
+        if revoked:
+            message += f"👤 User's premium plan has been revoked."
+        else:
+            message += f"👤 No user plan was revoked (user might be admin or not found)."
+        
         await query.edit_message_text(
-            f"✅ Used code `{code}` deleted!",
+            message,
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
         )
