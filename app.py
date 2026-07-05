@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION
+# app.py - COMPLETE FIXED VERSION WITH WORKING REDEEM CODES
 import os
 import logging
 import asyncio
@@ -124,6 +124,7 @@ class Database:
         return self.users.get(user_id)
     
     def get_user_plan(self, user_id):
+        """Get user's plan and expiry - FIXED"""
         user = self.get_user(user_id)
         if not user:
             return "free", None
@@ -153,22 +154,21 @@ class Database:
             if expiry and isinstance(expiry, datetime):
                 if expiry < datetime.now():
                     # Plan expired - set to free
-                    plan = "free"
+                    logger.info(f"User {user_id} plan expired, resetting to free")
                     self.update_user_plan(user_id, "free", None)
-                    expiry = None
                     return "free", None
                 else:
                     # Plan is still valid
                     return "premium", expiry
             else:
                 # No valid expiry - treat as free
-                plan = "free"
                 self.update_user_plan(user_id, "free", None)
                 return "free", None
         
         return plan, expiry
     
     def update_user_plan(self, user_id, plan, expiry):
+        """Update user plan - FIXED"""
         if not self.memory_mode:
             # Convert datetime to string for MongoDB, or None for lifetime
             expiry_str = expiry.isoformat() if expiry and isinstance(expiry, datetime) else None
@@ -222,7 +222,8 @@ class Database:
                 "added_by": added_by,
                 "added_at": datetime.now()
             })
-            self.update_user_plan(user_id, "premium", None)  # Lifetime premium
+            # Give lifetime premium to admins
+            self.update_user_plan(user_id, "premium", None)
             return True
         else:
             if user_id in self.admins:
@@ -309,6 +310,7 @@ class Database:
             self.users[user_id]["last_attack_duration"] = duration
     
     def create_code(self, code, days, created_by):
+        """Create a new redeem code"""
         if not self.memory_mode:
             if self.codes.find_one({"code": code}):
                 return False
@@ -321,6 +323,7 @@ class Database:
                 "used_at": None,
                 "is_used": False
             })
+            logger.info(f"Created code: {code} for {days} days by {created_by}")
             return True
         else:
             if code in self.codes:
@@ -334,24 +337,50 @@ class Database:
             return True
     
     def use_code(self, code, user_id):
+        """Redeem a code - FIXED"""
         if not self.memory_mode:
+            # Find unused code
             code_data = self.codes.find_one({"code": code, "is_used": False})
-            if code_data:
-                # Mark code as used
-                self.codes.update_one(
-                    {"code": code},
-                    {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
-                )
-                # Calculate expiry
-                days = code_data['access_days']
-                if days >= 3650:  # Lifetime
-                    expiry = None
-                else:
-                    expiry = datetime.now() + timedelta(days=days)
-                
-                # Update user with premium plan
-                expiry_str = expiry.isoformat() if expiry else None
-                self.users.update_one(
+            if not code_data:
+                logger.warning(f"Code {code} not found or already used")
+                return None
+            
+            # Mark code as used
+            self.codes.update_one(
+                {"code": code},
+                {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
+            )
+            
+            # Calculate expiry
+            days = code_data['access_days']
+            if days >= 3650:  # Lifetime
+                expiry = None
+            else:
+                expiry = datetime.now() + timedelta(days=days)
+            
+            # Update user with premium plan - FIXED: Using update_user_plan directly
+            expiry_str = expiry.isoformat() if expiry else None
+            
+            # Direct update
+            result = self.users.update_one(
+                {"user_id": user_id},
+                {"$set": {
+                    "plan": "premium",
+                    "plan_expiry": expiry_str,
+                    "has_used_code": True,
+                    "code_used": code,
+                    "redeem_date": datetime.now().isoformat()
+                }}
+            )
+            
+            if result.modified_count > 0 or result.matched_count > 0:
+                logger.info(f"✅ User {user_id} redeemed code {code} - Plan: premium, Expiry: {expiry_str}")
+                return code_data
+            else:
+                # If user doesn't exist, create them first
+                self.add_user(user_id)
+                # Retry update
+                result = self.users.update_one(
                     {"user_id": user_id},
                     {"$set": {
                         "plan": "premium",
@@ -361,20 +390,30 @@ class Database:
                         "redeem_date": datetime.now().isoformat()
                     }}
                 )
-                logger.info(f"User {user_id} redeemed code {code} - Plan: premium, Expiry: {expiry_str}")
-                return code_data
+                if result.modified_count > 0 or result.matched_count > 0:
+                    logger.info(f"✅ User {user_id} created and redeemed code {code}")
+                    return code_data
+                else:
+                    logger.error(f"❌ Failed to update user {user_id} with code {code}")
+                    return None
         else:
+            # Memory mode
             if code in self.codes and not self.codes[code]["is_used"]:
                 code_data = self.codes[code]
                 code_data["is_used"] = True
-                expiry = datetime.now() + timedelta(days=code_data['access_days'])
+                days = code_data['access_days']
+                if days >= 3650:
+                    expiry = None
+                else:
+                    expiry = datetime.now() + timedelta(days=days)
+                
                 if user_id in self.users:
                     self.users[user_id]["plan"] = "premium"
                     self.users[user_id]["plan_expiry"] = expiry
                     self.users[user_id]["has_used_code"] = True
                     self.users[user_id]["code_used"] = code
                     self.users[user_id]["redeem_date"] = datetime.now()
-                return code_data
+                    return code_data
         return None
     
     def get_codes(self, only_unused=False):
@@ -1813,6 +1852,7 @@ async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ===== REDEEM COMMAND =====
 async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle redeem command - FIXED"""
     user_id = update.effective_user.id
     
     args = context.args
@@ -1821,7 +1861,7 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🎫 *REDEEM CODE*\n\n"
             "Send: `/redeem CODE`\n"
             "Example: `/redeem ABC123XYZ`\n\n"
-            "💡 You can only redeem ONE code.",
+            "💡 You can only redeem ONE code per user.",
             parse_mode='Markdown'
         )
         return
@@ -1845,6 +1885,7 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
     
+    # Try to use the code
     result = db.use_code(code, user_id)
     
     if result:
@@ -1866,13 +1907,16 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
         
-        verify = db.get_user(user_id)
-        logger.info(f"User {user_id} after redeem - Plan: {verify.get('plan') if verify else 'None'}, Expiry: {verify.get('plan_expiry') if verify else 'None'}")
+        # Verify update
+        verify_user = db.get_user(user_id)
+        if verify_user:
+            logger.info(f"User {user_id} after redeem - Plan: {verify_user.get('plan')}, Expiry: {verify_user.get('plan_expiry')}")
         
     else:
         await update.message.reply_text(
             "❌ *INVALID CODE*\n\n"
-            "The code is invalid or already used.",
+            "The code is invalid or already used.\n\n"
+            "💡 Codes are case-insensitive and can only be used once.",
             parse_mode='Markdown'
         )
 
