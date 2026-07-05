@@ -1,5 +1,4 @@
-
-# app.py - COMPLETE FIXED VERSION WITH PROPER REDEEM CODE PERSISTENCE
+# app.py - COMPLETE FIXED VERSION WITH PROPER REDEEM CODE PERSISTENCE AND FIXED DELETE FUNCTIONS
 import os
 import logging
 import asyncio
@@ -1375,47 +1374,44 @@ async def admin_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
     )
 
+# ===== DELETE FUNCTIONS - COMPLETELY FIXED =====
 async def admin_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show unused codes to delete"""
     query = update.callback_query
     await query.answer()
     
+    user_id = query.from_user.id
+    if not db.is_admin(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
     codes = db.get_codes(only_unused=True)
     if not codes:
-        await query.edit_message_text("No unused codes to delete!")
+        await query.edit_message_text(
+            "📋 No unused codes to delete!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
         return
     
     keyboard = []
     for c in codes[:10]:
         code = c['code']
         duration_text = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
-        keyboard.append([InlineKeyboardButton(f"❌ {code} ({duration_text})", callback_data=f"del_{code}")])
+        keyboard.append([InlineKeyboardButton(f"❌ {code} ({duration_text})", callback_data=f"delunused_{code}")])
+    
+    keyboard.append([InlineKeyboardButton("🗑️ DELETE ALL UNUSED", callback_data="delallunused")])
     keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="admin")])
     
     await query.edit_message_text(
-        "🗑️ *DELETE UNUSED CODE*\n\nSelect a code to delete:",
+        "🗑️ *DELETE UNUSED CODES*\n\n"
+        "Select a code to delete:\n\n"
+        f"Total unused codes: {len(codes)}",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
 
-async def process_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    
-    code = query.data.replace('del_', '')
-    if db.delete_code(code):
-        await query.edit_message_text(
-            f"✅ Code `{code}` deleted!",
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
-        )
-    else:
-        await query.edit_message_text(
-            "❌ Failed to delete code!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
-        )
-
-# ===== DELETE USED CODES =====
 async def admin_delete_used_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show used codes to delete"""
     query = update.callback_query
     await query.answer()
     
@@ -1441,8 +1437,9 @@ async def admin_delete_used_callback(update: Update, context: ContextTypes.DEFAU
         code = c['code']
         used_by = c.get('used_by', 'Unknown')
         duration_text = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
-        keyboard.append([InlineKeyboardButton(f"❌ {code} ({duration_text}) - Used by {used_by}", callback_data=f"del_used_{code}")])
+        keyboard.append([InlineKeyboardButton(f"❌ {code} ({duration_text})", callback_data=f"delused_{code}")])
     
+    keyboard.append([InlineKeyboardButton("🗑️ DELETE ALL USED", callback_data="delallused")])
     keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="admin")])
     
     await query.edit_message_text(
@@ -1453,11 +1450,64 @@ async def admin_delete_used_callback(update: Update, context: ContextTypes.DEFAU
         parse_mode='Markdown'
     )
 
-async def process_delete_used_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_delete_unused_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process delete unused code"""
     query = update.callback_query
     await query.answer()
     
-    code = query.data.replace('del_used_', '')
+    data = query.data
+    
+    if data == "delallunused":
+        # Delete all unused codes
+        unused_codes = db.get_codes(only_unused=True)
+        deleted = 0
+        for c in unused_codes:
+            if db.delete_code(c['code']):
+                deleted += 1
+        await query.edit_message_text(
+            f"✅ Deleted {deleted} unused codes!",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
+        return
+    
+    # Delete single unused code
+    code = data.replace('delunused_', '')
+    if db.delete_code(code):
+        await query.edit_message_text(
+            f"✅ Code `{code}` deleted!",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
+    else:
+        await query.edit_message_text(
+            "❌ Failed to delete code!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
+
+async def process_delete_used_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process delete used code"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data
+    
+    if data == "delallused":
+        # Delete all used codes
+        used_codes = [c for c in db.get_codes(only_unused=False) if c.get('is_used', False)]
+        deleted = 0
+        for c in used_codes:
+            if db.delete_code(c['code']):
+                deleted += 1
+        await query.edit_message_text(
+            f"✅ Deleted {deleted} used codes!",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
+        return
+    
+    # Delete single used code
+    code = data.replace('delused_', '')
     if db.delete_code(code):
         await query.edit_message_text(
             f"✅ Used code `{code}` deleted!",
@@ -2057,15 +2107,19 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
     
-    # Admin
+    # Admin - Updated handlers
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
     app.add_handler(CallbackQueryHandler(admin_gen_callback, pattern="^admin_gen$"))
     app.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
     app.add_handler(CallbackQueryHandler(admin_list_callback, pattern="^admin_list$"))
     app.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
     app.add_handler(CallbackQueryHandler(admin_delete_used_callback, pattern="^admin_delete_used$"))
-    app.add_handler(CallbackQueryHandler(process_delete_callback, pattern="^del_"))
-    app.add_handler(CallbackQueryHandler(process_delete_used_callback, pattern="^del_used_"))
+    
+    # Delete handlers - Updated patterns
+    app.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delunused_"))
+    app.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delallunused$"))
+    app.add_handler(CallbackQueryHandler(process_delete_used_callback, pattern="^delused_"))
+    app.add_handler(CallbackQueryHandler(process_delete_used_callback, pattern="^delallused$"))
     
     # Owner
     app.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
