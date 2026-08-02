@@ -41,7 +41,7 @@ MAX_COOLDOWN = 70
 # Attack Methods
 ATTACK_METHODS = [
     "UDP", "DNS", "Telegram-VC", "UDPNUKE", "VSE", 
-    "UDP-BIG", "SAMP", "ICMP"
+    "UDP-BIG", "SAMP", "ICMP", "RUST", "STEAM"
 ]
 
 logging.basicConfig(
