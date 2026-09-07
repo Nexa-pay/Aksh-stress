@@ -650,7 +650,7 @@ class Database:
             self.settings["pause_all"] = paused
             return False
     
-    def log_attack(self, user_id, target, port, duration, method, status, response, concurrent_count=1):
+    def log_attack(self, user_id, target, port, duration, method, status, response, concurrent_count=2):
         try:
             log = {
                 "user_id": user_id,
