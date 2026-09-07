@@ -1,15 +1,13 @@
-# Build Docker image
-docker build -t guru_bot .
+FROM python:3.9-slim
 
-# Run with Docker
-docker run -d \
-  --name guru_bot \
-  -p 8080:8080 \
-  --env-file .env \
-  guru_bot
+WORKDIR /app
 
-# Or use docker-compose
-docker-compose up -d
+RUN apt-get update && apt-get install -y \
+    && rm -rf /var/lib/apt/lists/*
 
-# Check logs
-docker logs -f guru_bot
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app.py .
+
+CMD ["python", "app.py"]
