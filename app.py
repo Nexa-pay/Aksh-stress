@@ -37,6 +37,7 @@ MIN_CONCURRENT = 1
 MAX_CONCURRENT = 8
 MIN_DURATION = 30
 MAX_DURATION = 300
+TOTAL_CONCURRENT = 8  # Total API concurrent limit
 
 # ATTACK METHODS
 ATTACK_METHODS = [
@@ -660,16 +661,15 @@ async def send_api_attack(target, port, duration, method, concurrent):
         logger.error(f"API attack failed: {e}")
         return {"success": False, "error": str(e)[:50], "concurrent": concurrent}
 
-# ===== ATTACK MANAGER - SUPPORTS MULTIPLE SIMULTANEOUS ATTACKS =====
+# ===== ATTACK MANAGER =====
 class AttackManager:
     def __init__(self):
-        self.active_attacks = []  # List of active attacks
+        self.active_attacks = []
         self.total_attacks = 0
         self.lock = asyncio.Lock()
         logger.info(f"🔥 Attack Manager initialized with concurrent: {get_concurrent()}")
     
     async def can_start_attack(self, user_id):
-        """Check if user can start a new attack"""
         if db.is_banned(user_id):
             return False, "❌ You are banned!"
         
@@ -686,12 +686,10 @@ class AttackManager:
         return True, "OK"
     
     async def start_attack(self, user_id, target, port, duration, method, context, concurrent):
-        """Start a new attack (allows multiple simultaneous)"""
         async with self.lock:
             attack_id = self.total_attacks + 1
             self.total_attacks += 1
             
-            # Create attack task
             attack_info = {
                 'id': attack_id,
                 'user_id': user_id,
@@ -707,7 +705,6 @@ class AttackManager:
             logger.info(f"🔥 Attack {attack_id} starting - User: {user_id} - Target: {target}:{port} - Concurrent: {concurrent}")
             logger.info(f"📊 Active attacks: {len(self.active_attacks)}")
             
-            # Execute attack
             asyncio.create_task(
                 self.execute_attack(attack_id, target, port, duration, user_id, context, method, concurrent)
             )
@@ -718,6 +715,21 @@ class AttackManager:
         try:
             result = await send_api_attack(target, port, duration, method, concurrent)
             
+            # Get user info for display
+            user = db.get_user(user_id)
+            first_name = user.get('first_name', 'User') if user else 'User'
+            username = user.get('username', '') if user else ''
+            
+            # Create display name: use first_name if available, otherwise username, fallback to ID
+            if first_name and first_name != 'User' and first_name != 'N/A':
+                display_name = first_name
+            elif username and username != 'N/A':
+                display_name = f"@{username}"
+            else:
+                display_name = f"User {user_id}"
+            
+            plan = user.get('plan', 'free').upper() if user else 'FREE'
+            
             db.log_attack(
                 user_id, target, port, duration, method,
                 "success" if result.get('success') else "failed",
@@ -725,11 +737,17 @@ class AttackManager:
                 concurrent
             )
             
+            # Get active attacks count for concurrent display
+            active_count = len(self.active_attacks)
+            used_concurrent = active_count * get_concurrent()
+            concurrent_display = f"{used_concurrent}/{TOTAL_CONCURRENT}"
+            
+            # Send result to user
             if result.get('success'):
                 attack_id_resp = result.get('attack_id', 'N/A')
                 await context.bot.send_message(
                     user_id,
-                    f"✅ *Attack #{attack_id} Completed!*\n\n"
+                    f"✅ *Attack Completed!*\n\n"
                     f"🎯 Target: `{target}:{port}`\n"
                     f"⏱️ Duration: `{duration}s`\n"
                     f"🔄 Concurrent: **{concurrent}**\n"
@@ -742,7 +760,7 @@ class AttackManager:
                 error = result.get('error', 'Unknown error')
                 await context.bot.send_message(
                     user_id,
-                    f"❌ *Attack #{attack_id} Failed!*\n\n"
+                    f"❌ *Attack Failed!*\n\n"
                     f"🎯 Target: `{target}:{port}`\n"
                     f"🔄 Concurrent: **{concurrent}**\n"
                     f"📡 Method: `{method}`\n"
@@ -750,64 +768,69 @@ class AttackManager:
                     parse_mode='Markdown'
                 )
                 
-            # Send alert to admins
+            # Send alert to admins with user name (like old format)
             admins = db.get_admins()
+            plan_display = "PREMIUM" if plan == "PREMIUM" else "FREE"
+            
             for admin in admins:
                 try:
                     status_emoji = "✅" if result.get('success') else "❌"
+                    status_text = "SUCCESS" if result.get('success') else "FAILED"
+                    
                     await context.bot.send_message(
                         admin['user_id'],
                         f"⚡ *ATTACK ALERT*\n\n"
-                        f"{status_emoji} Status: {'SUCCESS' if result.get('success') else 'FAILED'}\n"
+                        f"{status_emoji} Status: {status_text}\n"
                         f"🆔 Attack #: {attack_id}\n"
-                        f"👤 User: {user_id}\n"
+                        f"👤 User: {display_name}\n"
+                        f"🆔 ID: `{user_id}`\n"
+                        f"📊 Plan: {plan_display}\n"
                         f"🎯 Target: `{target}:{port}`\n"
                         f"⏱️ Duration: {duration}s\n"
                         f"📡 Method: {method}\n"
-                        f"🔄 Concurrent: **{concurrent}**\n"
+                        f"🔄 Concurrent: {concurrent_display}\n"
                         f"📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
                         parse_mode='Markdown'
                     )
-                except:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to send alert to admin: {e}")
                     
         except Exception as e:
             logger.error(f"❌ Attack {attack_id} error: {e}")
         finally:
-            # Cleanup
             await self.cleanup_attack(attack_id)
     
     async def cleanup_attack(self, attack_id):
-        """Remove attack from active list after completion"""
         async with self.lock:
             self.active_attacks = [a for a in self.active_attacks if a['id'] != attack_id]
             logger.info(f"✅ Attack {attack_id} cleaned up. Active attacks: {len(self.active_attacks)}")
     
     async def stop_attack(self, user_id, attack_id=None):
-        """Stop a specific attack or all attacks"""
         async with self.lock:
             if not self.active_attacks:
                 return False, "No active attacks!"
             
             if attack_id:
-                # Stop specific attack
                 attack = next((a for a in self.active_attacks if a['id'] == attack_id), None)
                 if attack:
                     self.active_attacks = [a for a in self.active_attacks if a['id'] != attack_id]
                     return True, f"Attack #{attack_id} stopped!"
                 return False, f"Attack #{attack_id} not found!"
             else:
-                # Stop all attacks
                 count = len(self.active_attacks)
                 self.active_attacks = []
                 return True, f"Stopped {count} active attacks!"
     
     def get_stats(self):
-        """Get current stats"""
+        active_count = len(self.active_attacks)
+        used_concurrent = active_count * get_concurrent()
+        
         return {
-            'active_attacks': len(self.active_attacks),
+            'active_attacks': active_count,
             'total_attacks': self.total_attacks,
             'concurrent_value': get_concurrent(),
+            'used_concurrent': used_concurrent,
+            'remaining_concurrent': TOTAL_CONCURRENT - used_concurrent,
             'active_targets': [a['target'] for a in self.active_attacks]
         }
 
@@ -818,7 +841,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
-    db.add_user(user_id, user.username, user.first_name)
+    # Get user info from Telegram
+    first_name = user.first_name or "User"
+    username = user.username
+    
+    db.add_user(user_id, username, first_name)
     
     plan, expiry = db.get_user_plan(user_id)
     is_admin = db.is_admin(user_id)
@@ -837,7 +864,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         days_left = max(0, (expiry - datetime.now()).days)
         plan_display = f"💎 PREMIUM ({days_left}d left)"
     
-    active_text = f"🟢 Active Attacks: {stats['active_attacks']}" if stats['active_attacks'] > 0 else "🔴 No Active Attacks"
+    active_attacks = stats['active_attacks']
+    used_concurrent = stats['used_concurrent']
+    remaining_concurrent = stats['remaining_concurrent']
+    max_attacks = TOTAL_CONCURRENT // get_concurrent()
+    
+    active_text = f"🟢 Active Attacks: {active_attacks}" if active_attacks > 0 else "🔴 No Active Attacks"
     
     keyboard = []
     if not db.is_banned(user_id):
@@ -853,19 +885,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     welcome_msg = (
         f"👋 *WELCOME TO GURU*\n\n"
-        f"Hello {user.first_name}! 👋\n"
+        f"Hello {first_name}! 👋\n"
         f"📊 Total Attacks: {total_attacks}\n"
         f"📊 Plan: {plan_display}\n"
         f"⚡ Status: {active_text}\n"
         f"🔄 Concurrent per Attack: **{get_concurrent()}**\n"
-        f"📡 Total API Concurrent: **8**\n"
-        f"📡 Max Simultaneous Attacks: **4** (8 ÷ 2)\n\n"
+        f"📡 Used/Total Concurrent: **{used_concurrent}/{TOTAL_CONCURRENT}**\n"
+        f"📡 Max Simultaneous Attacks: **{max_attacks}**\n\n"
         f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack IP PORT TIME'}\n"
         f"📡 Default method: UDP-FLOOD\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION} seconds\n\n"
         f"⚡ *ATTACK FEATURES*\n"
         f"• {get_concurrent()}x concurrent per attack\n"
-        f"• Multiple attacks allowed (up to 4 simultaneous)\n"
+        f"• Multiple attacks allowed (up to {max_attacks} simultaneous)\n"
         f"📡 *Methods:* " + ", ".join(ATTACK_METHODS[:5]) + f"... (+{len(ATTACK_METHODS)-5} more)"
     )
     
@@ -895,8 +927,8 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Example: `/attack 8.8.8.8 43 30`\n"
             f"With method: `/attack 8.8.8.8 43 30 TCP-SYN`\n\n"
             f"⚡ Concurrent per attack: **{get_concurrent()}**\n"
-            f"📡 Total API Concurrent: **8**\n"
-            f"📡 Max simultaneous: **4** attacks\n"
+            f"📡 Total API Concurrent: **{TOTAL_CONCURRENT}**\n"
+            f"📡 Max simultaneous: **{TOTAL_CONCURRENT // get_concurrent()}** attacks\n"
             f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n"
             f"📡 Default Method: UDP-FLOOD",
             parse_mode='Markdown'
@@ -927,6 +959,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         stats = attack_manager.get_stats()
+        
         await update.message.reply_text(
             f"✅ *ATTACK STARTED!*\n\n"
             f"🎯 Target: `{target}:{port}`\n"
@@ -934,7 +967,8 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📡 Method: `{method}`\n"
             f"🔄 Concurrent: **{get_concurrent()}**\n"
             f"⚡ Active Attacks: **{stats['active_attacks']}**\n"
-            f"📡 Remaining Concurrent: **{8 - (stats['active_attacks'] * get_concurrent())}**\n"
+            f"📡 Used/Total Concurrent: **{stats['used_concurrent']}/{TOTAL_CONCURRENT}**\n"
+            f"📡 Remaining Concurrent: **{stats['remaining_concurrent']}**\n"
             f"⚡ Status: **RUNNING**",
             parse_mode='Markdown'
         )
@@ -976,8 +1010,8 @@ async def set_concurrent_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text(
             f"⚡ *CONCURRENT SETTINGS*\n\n"
             f"Current concurrent per attack: **{get_concurrent()}**\n"
-            f"Total API Concurrent: **8**\n"
-            f"Max simultaneous attacks: **{8 // get_concurrent()}**\n"
+            f"Total API Concurrent: **{TOTAL_CONCURRENT}**\n"
+            f"Max simultaneous attacks: **{TOTAL_CONCURRENT // get_concurrent()}**\n"
             f"Min: {MIN_CONCURRENT}\n"
             f"Max: {MAX_CONCURRENT}\n\n"
             f"Usage: `/setconcurrent 2`",
@@ -993,11 +1027,11 @@ async def set_concurrent_command(update: Update, context: ContextTypes.DEFAULT_T
         
         set_concurrent(new_concurrent)
         
-        max_attacks = 8 // new_concurrent
+        max_attacks = TOTAL_CONCURRENT // new_concurrent
         await update.message.reply_text(
             f"✅ *Concurrent updated!*\n\n"
             f"New concurrent per attack: **{get_concurrent()}**\n"
-            f"Total API Concurrent: **8**\n"
+            f"Total API Concurrent: **{TOTAL_CONCURRENT}**\n"
             f"Max simultaneous attacks: **{max_attacks}**\n\n"
             f"All future attacks will use {get_concurrent()} concurrent connections.",
             parse_mode='Markdown'
@@ -1066,17 +1100,13 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     stats = attack_manager.get_stats()
     users = db.get_all_users()
     
-    active_attacks = stats['active_attacks']
-    used_concurrent = active_attacks * get_concurrent()
-    remaining_concurrent = 8 - used_concurrent
-    
     await update.message.reply_text(
         f"📊 *BOT STATUS*\n\n"
         f"🔄 Concurrent per attack: **{get_concurrent()}**\n"
-        f"📡 Total API Concurrent: **8**\n"
-        f"⚡ Active Attacks: **{active_attacks}**\n"
-        f"📡 Used Concurrent: **{used_concurrent}**\n"
-        f"📡 Remaining Concurrent: **{remaining_concurrent}**\n"
+        f"📡 Total API Concurrent: **{TOTAL_CONCURRENT}**\n"
+        f"⚡ Active Attacks: **{stats['active_attacks']}**\n"
+        f"📡 Used Concurrent: **{stats['used_concurrent']}**\n"
+        f"📡 Remaining Concurrent: **{stats['remaining_concurrent']}**\n"
         f"👥 Users: {len(users)}\n"
         f"💥 Total Attacks: {stats['total_attacks']}\n"
         f"📡 Default: UDP-FLOOD",
@@ -1140,13 +1170,14 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="back")])
     
     stats = attack_manager.get_stats()
-    max_attacks = 8 // get_concurrent()
+    max_attacks = TOTAL_CONCURRENT // get_concurrent()
     
     await query.edit_message_text(
         f"💥 *SELECT ATTACK METHOD*\n\n"
         f"🔄 Concurrent per attack: **{get_concurrent()}**\n"
         f"⚡ Active Attacks: **{stats['active_attacks']}**\n"
-        f"📡 Remaining Concurrent: **{8 - (stats['active_attacks'] * get_concurrent())}**\n"
+        f"📡 Used/Total Concurrent: **{stats['used_concurrent']}/{TOTAL_CONCURRENT}**\n"
+        f"📡 Remaining Concurrent: **{stats['remaining_concurrent']}**\n"
         f"📡 Max simultaneous: **{max_attacks}**\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n\n"
         f"⭐ UDP-FLOOD is the default method\n\n"
@@ -1194,8 +1225,8 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "👑 *OWNER ACCESS*\n\n"
                 "📊 Plan: 💎 PREMIUM (Owner)\n"
                 f"⚡ {get_concurrent()}x Concurrent per attack\n"
-                f"📡 Total API Concurrent: 8\n"
-                f"📡 Max simultaneous: {8 // get_concurrent()}\n"
+                f"📡 Total API Concurrent: {TOTAL_CONCURRENT}\n"
+                f"📡 Max simultaneous: {TOTAL_CONCURRENT // get_concurrent()}\n"
                 f"📡 {len(ATTACK_METHODS)} Attack Methods"
             )
         elif expiry:
@@ -1207,8 +1238,8 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📅 Expires: {expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
                 "📌 Features:\n"
                 f"• {get_concurrent()}x Concurrent per attack\n"
-                f"• Total API Concurrent: 8\n"
-                f"• Max simultaneous: {8 // get_concurrent()}\n"
+                f"• Total API Concurrent: {TOTAL_CONCURRENT}\n"
+                f"• Max simultaneous: {TOTAL_CONCURRENT // get_concurrent()}\n"
                 f"• {len(ATTACK_METHODS)} attack methods"
             )
         else:
@@ -1218,8 +1249,8 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "⏱️ Status: LIFETIME\n\n"
                 "📌 Features:\n"
                 f"• {get_concurrent()}x Concurrent per attack\n"
-                f"• Total API Concurrent: 8\n"
-                f"• Max simultaneous: {8 // get_concurrent()}\n"
+                f"• Total API Concurrent: {TOTAL_CONCURRENT}\n"
+                f"• Max simultaneous: {TOTAL_CONCURRENT // get_concurrent()}\n"
                 f"• {len(ATTACK_METHODS)} attack methods"
             )
     
@@ -1245,7 +1276,7 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     banned_users = len([u for u in users if u.get('is_banned')])
     premium_users = sum(1 for u in users if u.get('plan') == 'premium')
     
-    max_attacks = 8 // get_concurrent()
+    max_attacks = TOTAL_CONCURRENT // get_concurrent()
     
     await query.edit_message_text(
         f"📊 *BOT STATISTICS*\n\n"
@@ -1255,9 +1286,10 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👑 Admins: {len(admins)}\n"
         f"💥 Attacks: {total_attacks}\n"
         f"🔄 Concurrent per attack: {get_concurrent()}\n"
-        f"📡 Total API Concurrent: 8\n"
+        f"📡 Total API Concurrent: {TOTAL_CONCURRENT}\n"
         f"📡 Max simultaneous: {max_attacks}\n"
-        f"⚡ Active Attacks: {stats['active_attacks']}",
+        f"⚡ Active Attacks: {stats['active_attacks']}\n"
+        f"📡 Used/Total Concurrent: {stats['used_concurrent']}/{TOTAL_CONCURRENT}",
         parse_mode='Markdown',
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="back")]])
     )
@@ -1477,7 +1509,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 LIST USERS", callback_data="owner_list_users")],
         [InlineKeyboardButton(pause_text, callback_data="owner_pause")],
         [InlineKeyboardButton("🔌 API STATUS", callback_data="owner_api_status")],
-        [InlineKeyboardButton("🛑 STOP ATTACK", callback_data="owner_stop")],
+        [InlineKeyboardButton("🛑 STOP ALL ATTACKS", callback_data="owner_stop")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
     ]
     
@@ -1486,8 +1518,8 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Status: {'⏸️ PAUSED' if pause_status else '🟢 ACTIVE'}\n"
         f"⚡ Active Attacks: {stats['active_attacks']}\n"
         f"🔄 Concurrent per attack: **{get_concurrent()}**\n"
-        f"📡 Total API Concurrent: 8\n"
-        f"📡 Max simultaneous: {8 // get_concurrent()}",
+        f"📡 Used/Total Concurrent: **{stats['used_concurrent']}/{TOTAL_CONCURRENT}**\n"
+        f"📡 Max simultaneous: {TOTAL_CONCURRENT // get_concurrent()}",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -1501,8 +1533,8 @@ async def owner_concurrent_callback(update: Update, context: ContextTypes.DEFAUL
         f"Current: **{get_concurrent()}**\n"
         f"Min: {MIN_CONCURRENT}\n"
         f"Max: {MAX_CONCURRENT}\n"
-        f"Total API Concurrent: 8\n"
-        f"Max simultaneous attacks: {8 // get_concurrent()}\n\n"
+        f"Total API Concurrent: {TOTAL_CONCURRENT}\n"
+        f"Max simultaneous attacks: {TOTAL_CONCURRENT // get_concurrent()}\n\n"
         f"Send: `/setconcurrent NUMBER`\n"
         f"Example: `/setconcurrent 2`",
         parse_mode='Markdown'
@@ -1521,8 +1553,9 @@ async def owner_stop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     
     if success:
         await query.edit_message_text(
-            f"🛑 *Attacks Stopped!*\n\n{msg}",
-            parse_mode='Markdown'
+            f"🛑 *All Attacks Stopped!*\n\n{msg}",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
         )
     else:
         await query.edit_message_text(f"❌ {msg}")
@@ -1705,7 +1738,10 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
     for admin in admins:
         level = admin.get('level', 'admin').upper()
         admin_id = admin['user_id']
-        text += f"• {admin_id} - {level}\n"
+        # Get username for admin
+        user = db.get_user(admin_id)
+        username = user.get('username', 'N/A') if user else 'N/A'
+        text += f"• {admin_id} - @{username} - {level}\n"
     
     await query.edit_message_text(
         text,
@@ -1734,7 +1770,7 @@ async def owner_list_users_callback(update: Update, context: ContextTypes.DEFAUL
         text += f"\n... and {len(users) - 20} more"
     
     await query.edit_message_text(
-        text[:4000],
+        text,
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
     )
 
@@ -1786,7 +1822,7 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     details = f"📊 Response: {str(response_data)[:200]}"
                 
                 await query.edit_message_text(
-                    f"🔌 API STATUS\n\n{message}\n\n{details}\n\n⚡ Concurrent per attack: {get_concurrent()}\n📡 Total API Concurrent: 8",
+                    f"🔌 API STATUS\n\n{message}\n\n{details}\n\n⚡ Concurrent per attack: {get_concurrent()}\n📡 Total API Concurrent: {TOTAL_CONCURRENT}",
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 REFRESH", callback_data="owner_api_status")],
                         [InlineKeyboardButton("🔙 BACK", callback_data="owner")]
@@ -1860,8 +1896,8 @@ def main():
     print("=" * 60)
     print("🔥 GURU ATTACK BOT - MULTIPLE ATTACKS SUPPORT 🔥")
     print(f"⚡ DEFAULT CONCURRENT: {get_concurrent()}")
-    print(f"📡 TOTAL API CONCURRENT: 8")
-    print(f"📡 MAX SIMULTANEOUS ATTACKS: {8 // get_concurrent()}")
+    print(f"📡 TOTAL API CONCURRENT: {TOTAL_CONCURRENT}")
+    print(f"📡 MAX SIMULTANEOUS ATTACKS: {TOTAL_CONCURRENT // get_concurrent()}")
     print("=" * 60)
     print("💡 Commands:")
     print("  /attack IP PORT TIME [METHOD] - Start attack")
