@@ -1,7 +1,6 @@
 import os
 import logging
 import asyncio
-import threading
 import aiohttp
 import time
 import random
@@ -895,7 +894,7 @@ class AttackManager:
             )
             
             if attack_info:
-                await send_attack_alert(attack_info, result)
+                await send_attack_alert(attack_info, result, context)
             
             try:
                 if result.get('success'):
@@ -985,7 +984,7 @@ class AttackManager:
 attack_manager = AttackManager()
 
 # ===== SEND ALERT TO ADMINS =====
-async def send_attack_alert(attack_info, result=None):
+async def send_attack_alert(attack_info, result=None, context=None):
     try:
         admins = db.get_admins()
         user = db.get_user(attack_info['user_id'])
@@ -1010,21 +1009,24 @@ async def send_attack_alert(attack_info, result=None):
         if result and result.get('elapsed'):
             message += f"\n⏱️ Response: `{result['elapsed']:.2f}s`"
         
-        for admin in admins:
-            try:
-                global application
-                if application:
-                    await application.bot.send_message(
+        if context:
+            for admin in admins:
+                try:
+                    await context.bot.send_message(
                         admin['user_id'],
                         message,
                         parse_mode='Markdown'
                     )
-            except:
-                pass
+                except:
+                    pass
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
 # ===== TELEGRAM HANDLERS =====
+async def ping_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Simple ping command to test if bot is responding"""
+    await update.message.reply_text("Pong! 🏓 Bot is alive!")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
@@ -2274,65 +2276,91 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['awaiting_attack'] = False
 
-# ===== RUN BOT =====
-application = None
-
-def run_bot():
-    """Run the Telegram bot"""
+# ===== ASYNC BOT RUNNER =====
+async def run_bot_async():
+    """Run the Telegram bot asynchronously"""
     global application
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     
-    app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
-    application = app_bot
-    
-    # COMMANDS
-    app_bot.add_handler(CommandHandler("start", start))
-    app_bot.add_handler(CommandHandler("attack", attack_command))
-    app_bot.add_handler(CommandHandler("stop", stop_command))
-    app_bot.add_handler(CommandHandler("setconcurrent", set_concurrent_command))
-    app_bot.add_handler(CommandHandler("testapi", testapi_command))
-    app_bot.add_handler(CommandHandler("testconcs", test_concurrents_command))
-    app_bot.add_handler(CommandHandler("status", status_command))
-    app_bot.add_handler(CommandHandler("redeem", redeem_command))
-    app_bot.add_handler(CommandHandler("cancel", cancel))
-    
-    # CALLBACK QUERY HANDLERS
-    app_bot.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
-    app_bot.add_handler(CallbackQueryHandler(method_callback, pattern="^method_"))
-    app_bot.add_handler(CallbackQueryHandler(my_plan_callback, pattern="^my_plan$"))
-    app_bot.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
-    app_bot.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
-    app_bot.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
-    app_bot.add_handler(CallbackQueryHandler(admin_gen_callback, pattern="^admin_gen$"))
-    app_bot.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
-    app_bot.add_handler(CallbackQueryHandler(admin_list_callback, pattern="^admin_list$"))
-    app_bot.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
-    app_bot.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
-    app_bot.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delunused_"))
-    app_bot.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
-    app_bot.add_handler(CallbackQueryHandler(owner_concurrent_callback, pattern="^owner_concurrent$"))
-    app_bot.add_handler(CallbackQueryHandler(owner_pause_callback, pattern="^owner_pause$"))
-    app_bot.add_handler(CallbackQueryHandler(owner_promote_callback, pattern="^owner_promote$"))
-    app_bot.add_handler(CallbackQueryHandler(owner_demote_callback, pattern="^owner_demote$"))
-    app_bot.add_handler(CallbackQueryHandler(owner_ban_callback, pattern="^owner_ban$"))
-    app_bot.add_handler(CallbackQueryHandler(owner_unban_callback, pattern="^owner_unban$"))
-    app_bot.add_handler(CallbackQueryHandler(owner_list_admins_callback, pattern="^owner_list_admins$"))
-    app_bot.add_handler(CallbackQueryHandler(owner_list_users_callback, pattern="^owner_list_users$"))
-    app_bot.add_handler(CallbackQueryHandler(owner_api_status, pattern="^owner_api_status$"))
-    app_bot.add_handler(CallbackQueryHandler(owner_stop_callback, pattern="^owner_stop$"))
-    app_bot.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
-    
-    app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
-    
-    # Start the bot with polling
-    app_bot.run_polling(allowed_updates=Update.ALL_TYPES)
-
-async def run_quart():
-    """Run the Quart web server"""
-    await app.run_task(host='0.0.0.0', port=PORT)
+    try:
+        app_bot = Application.builder().token(TELEGRAM_TOKEN).build()
+        application = app_bot
+        
+        # COMMANDS
+        app_bot.add_handler(CommandHandler("ping", ping_command))
+        app_bot.add_handler(CommandHandler("start", start))
+        app_bot.add_handler(CommandHandler("attack", attack_command))
+        app_bot.add_handler(CommandHandler("stop", stop_command))
+        app_bot.add_handler(CommandHandler("setconcurrent", set_concurrent_command))
+        app_bot.add_handler(CommandHandler("testapi", testapi_command))
+        app_bot.add_handler(CommandHandler("testconcs", test_concurrents_command))
+        app_bot.add_handler(CommandHandler("status", status_command))
+        app_bot.add_handler(CommandHandler("redeem", redeem_command))
+        app_bot.add_handler(CommandHandler("cancel", cancel))
+        
+        # CALLBACK QUERY HANDLERS
+        app_bot.add_handler(CallbackQueryHandler(attack_callback, pattern="^attack$"))
+        app_bot.add_handler(CallbackQueryHandler(method_callback, pattern="^method_"))
+        app_bot.add_handler(CallbackQueryHandler(my_plan_callback, pattern="^my_plan$"))
+        app_bot.add_handler(CallbackQueryHandler(stats_callback, pattern="^stats$"))
+        app_bot.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
+        app_bot.add_handler(CallbackQueryHandler(admin_callback, pattern="^admin$"))
+        app_bot.add_handler(CallbackQueryHandler(admin_gen_callback, pattern="^admin_gen$"))
+        app_bot.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
+        app_bot.add_handler(CallbackQueryHandler(admin_list_callback, pattern="^admin_list$"))
+        app_bot.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
+        app_bot.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
+        app_bot.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delunused_"))
+        app_bot.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
+        app_bot.add_handler(CallbackQueryHandler(owner_concurrent_callback, pattern="^owner_concurrent$"))
+        app_bot.add_handler(CallbackQueryHandler(owner_pause_callback, pattern="^owner_pause$"))
+        app_bot.add_handler(CallbackQueryHandler(owner_promote_callback, pattern="^owner_promote$"))
+        app_bot.add_handler(CallbackQueryHandler(owner_demote_callback, pattern="^owner_demote$"))
+        app_bot.add_handler(CallbackQueryHandler(owner_ban_callback, pattern="^owner_ban$"))
+        app_bot.add_handler(CallbackQueryHandler(owner_unban_callback, pattern="^owner_unban$"))
+        app_bot.add_handler(CallbackQueryHandler(owner_list_admins_callback, pattern="^owner_list_admins$"))
+        app_bot.add_handler(CallbackQueryHandler(owner_list_users_callback, pattern="^owner_list_users$"))
+        app_bot.add_handler(CallbackQueryHandler(owner_api_status, pattern="^owner_api_status$"))
+        app_bot.add_handler(CallbackQueryHandler(owner_stop_callback, pattern="^owner_stop$"))
+        app_bot.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
+        
+        app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
+        
+        # Initialize and start
+        await app_bot.initialize()
+        await app_bot.start()
+        await app_bot.updater.start_polling()
+        
+        logger.info("🤖 Bot started and polling...")
+        logger.info(f"📡 Bot username: @{app_bot.bot.username if app_bot.bot.username else 'Unknown'}")
+        logger.info(f"💡 Use /ping to test if bot is alive")
+        
+        # Keep running
+        while True:
+            await asyncio.sleep(1)
+            
+    except Exception as e:
+        logger.error(f"Bot error: {e}")
+        raise
+    finally:
+        if application:
+            await application.stop()
 
 # ===== MAIN =====
+async def main():
+    """Main async function to run both bot and web server"""
+    # Start bot in background
+    bot_task = asyncio.create_task(run_bot_async())
+    
+    # Give bot time to start
+    await asyncio.sleep(2)
+    
+    # Start Quart web server
+    try:
+        await app.run_task(host='0.0.0.0', port=PORT)
+    except Exception as e:
+        logger.error(f"Quart error: {e}")
+        bot_task.cancel()
+
 if __name__ == "__main__":
     print("=" * 60)
     print("🔥 GURU ATTACK BOT - UDP-FLOOD DEFAULT 🔥")
@@ -2343,26 +2371,21 @@ if __name__ == "__main__":
     print(f"📡 Methods: {len(ATTACK_METHODS)} methods")
     print("=" * 60)
     print("💡 Commands:")
+    print("  /ping - Check if bot is alive")
+    print("  /start - Start the bot")
     print("  /attack IP PORT TIME [METHOD] [CONCURRENT] - Start attack")
     print("  /setconcurrent NUMBER - Change concurrent value")
     print("  /testapi HOST PORT TIME [CONCURRENT] [METHOD] - Test API")
     print("  /testconcs HOST PORT TIME [METHOD] - Test concurrent values")
     print("  /status - Show bot status")
     print("  /stop - Stop running attack")
+    print("  /redeem CODE - Redeem premium code")
     print("=" * 60)
+    print("🚀 Starting bot...")
     
-    # Start bot in a separate thread
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
-    logger.info("✅ Bot thread started")
-    
-    # Run Quart in the main thread
     try:
-        asyncio.run(run_quart())
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("🛑 Shutting down...")
     except Exception as e:
-        logger.error(f"❌ Error running Quart: {e}")
-        # If Quart fails, keep bot running
-        logger.info("✅ Bot is still running in the background")
-        bot_thread.join()
+        logger.error(f"❌ Error: {e}")
