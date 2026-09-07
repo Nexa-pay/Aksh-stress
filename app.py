@@ -2147,7 +2147,7 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "port": "53",
             "time": "30",
             "method": "udp-free",  # Changed to udp-free
-            "concs": "1"
+            "concs": "3"
         }
         
         headers = {
