@@ -2378,7 +2378,7 @@ if __name__ == "__main__":
     print("  /stop - Stop running attack")
     print("  /redeem CODE - Redeem premium code")
     print("=" * 60)
-    print("📝 API Format: /api?key=KEY&host=HOST&port=PORT&time=TIME&method=METHOD&concs=CONCS")
+    print("📝 API Format: /api?key=KEY&host=HOST&port=PORT&time=TIME&method=METHOD&concs=2")
     print("📝 UDP Methods: udp-flood, udp-vse, udp-dns, tcp-syn, tcp-ack, etc.")
     print("📝 L7 Methods: TLSV2, HTTPS-MIX, HTTP-KILLER, HTTP-DESTROYER, HTTP-BYPASSER")
     print("=" * 60)
