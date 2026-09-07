@@ -5,7 +5,14 @@ import aiohttp
 import json
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import (
+    Application, 
+    CommandHandler, 
+    CallbackQueryHandler, 
+    MessageHandler,
+    filters,
+    ContextTypes
+)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -108,7 +115,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     args = context.args
     
     if len(args) < 3:
@@ -333,7 +339,7 @@ def main():
     bot_app.add_handler(CallbackQueryHandler(test_callback, pattern="^test$"))
     bot_app.add_handler(CallbackQueryHandler(back_callback, pattern="^back$"))
     
-    # Message handler
+    # Message handler - FIXED: properly imported
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
     
     # Start bot
