@@ -23,7 +23,7 @@ load_dotenv()
 
 # ===== CONFIGURATION =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-API_KEY = os.getenv("API_KEY", "1w7msrL79rwnahnvzzRfSA")
+API_KEY = os.getenv("API_KEY", "iftYOWvUuppjCXGN21LZLx")
 API_URL = os.getenv("API_URL", "https://mrstresser.com/api")
 MONGO_URI = os.getenv("MONGO_URI")
 OWNER_ID = int(os.getenv("OWNER_ID", "123456789"))
