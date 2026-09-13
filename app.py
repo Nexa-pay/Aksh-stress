@@ -231,6 +231,82 @@ class Database:
             logger.error(f"Error updating user plan: {e}")
             return False
     
+    # ===== NEW: CANCEL MEMBERSHIP ANYTIME =====
+    def cancel_user_membership(self, user_id):
+        """Cancel a user's premium membership and reset to free"""
+        try:
+            if self.memory_mode:
+                if user_id in self.users:
+                    self.users[user_id]["plan"] = "free"
+                    self.users[user_id]["plan_expiry"] = None
+                    self.users[user_id]["has_used_code"] = False
+                    return True
+                return False
+            else:
+                result = self.users_col.update_one(
+                    {"user_id": user_id},
+                    {"$set": {
+                        "plan": "free",
+                        "plan_expiry": None,
+                        "has_used_code": False,
+                        "membership_cancelled_at": datetime.now()
+                    }}
+                )
+                return result.modified_count > 0 or result.matched_count > 0
+        except Exception as e:
+            logger.error(f"Error cancelling membership: {e}")
+            return False
+    
+    # ===== NEW: FIND CODE BY VALUE =====
+    def get_code_by_value(self, code):
+        """Get full code document including used ones"""
+        try:
+            if self.memory_mode:
+                return self.codes.get(code)
+            else:
+                return self.codes_col.find_one({"code": code})
+        except Exception as e:
+            logger.error(f"Error getting code: {e}")
+            return None
+    
+    # ===== NEW: DELETE ANY CODE (USED OR UNUSED) =====
+    def delete_any_code(self, code):
+        """Delete any code regardless of usage status"""
+        try:
+            if self.memory_mode:
+                if code in self.codes:
+                    del self.codes[code]
+                    return True
+                return False
+            else:
+                result = self.codes_col.delete_one({"code": code})
+                return result.deleted_count > 0
+        except Exception as e:
+            logger.error(f"Error deleting code: {e}")
+            return False
+    
+    # ===== NEW: REVOKE MEMBERSHIP BY CODE =====
+    def revoke_membership_by_code(self, code):
+        """Find who used a code and revoke their membership"""
+        try:
+            code_data = self.get_code_by_value(code)
+            if not code_data:
+                return False, "Code not found"
+            
+            if not code_data.get("is_used") and not code_data.get("used_by"):
+                return False, "Code has not been used yet"
+            
+            used_by = code_data.get("used_by")
+            if not used_by:
+                return False, "No user associated with this code"
+            
+            # Cancel the user's membership
+            self.cancel_user_membership(used_by)
+            return True, used_by
+        except Exception as e:
+            logger.error(f"Error revoking membership: {e}")
+            return False, str(e)
+    
     def is_admin(self, user_id):
         try:
             if self.memory_mode:
@@ -468,7 +544,6 @@ class Database:
             else:
                 self.logs_col.insert_one(log)
             
-            # Update user attack count
             if self.memory_mode:
                 if user_id in self.users:
                     self.users[user_id]["attack_count"] = self.users[user_id].get("attack_count", 0) + 1
@@ -587,7 +662,6 @@ init_pseudo_owner()
 
 # ===== API FUNCTIONS =====
 async def send_api_attack(target, port, duration, method, concurrent):
-    """Send attack to API with proper concurrent parameter"""
     api_key = API_KEY
     api_url = API_URL
     
@@ -715,12 +789,10 @@ class AttackManager:
         try:
             result = await send_api_attack(target, port, duration, method, concurrent)
             
-            # Get user info for display
             user = db.get_user(user_id)
             first_name = user.get('first_name', 'User') if user else 'User'
             username = user.get('username', '') if user else ''
             
-            # Create display name: use first_name if available, otherwise username, fallback to ID
             if first_name and first_name != 'User' and first_name != 'N/A':
                 display_name = first_name
             elif username and username != 'N/A':
@@ -737,12 +809,10 @@ class AttackManager:
                 concurrent
             )
             
-            # Get active attacks count for concurrent display
             active_count = len(self.active_attacks)
             used_concurrent = active_count * get_concurrent()
             concurrent_display = f"{used_concurrent}/{TOTAL_CONCURRENT}"
             
-            # Send result to user
             if result.get('success'):
                 attack_id_resp = result.get('attack_id', 'N/A')
                 await context.bot.send_message(
@@ -768,7 +838,6 @@ class AttackManager:
                     parse_mode='Markdown'
                 )
                 
-            # Send alert to admins with user name (like old format)
             admins = db.get_admins()
             plan_display = "PREMIUM" if plan == "PREMIUM" else "FREE"
             
@@ -841,7 +910,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     user_id = user.id
     
-    # Get user info from Telegram
     first_name = user.first_name or "User"
     username = user.username
     
@@ -1307,6 +1375,8 @@ async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("➕ GENERATE CODE", callback_data="admin_gen")],
         [InlineKeyboardButton("📋 LIST CODES", callback_data="admin_list")],
         [InlineKeyboardButton("🗑️ DELETE UNUSED CODE", callback_data="admin_delete")],
+        [InlineKeyboardButton("❌ DELETE ANY CODE", callback_data="admin_delete_any")],
+        [InlineKeyboardButton("🚫 REVOKE MEMBERSHIP", callback_data="admin_revoke")],
         [InlineKeyboardButton("📢 BROADCAST", callback_data="admin_broadcast")],
         [InlineKeyboardButton("📊 STATS", callback_data="stats")],
         [InlineKeyboardButton("🔙 BACK", callback_data="back")]
@@ -1415,6 +1485,262 @@ async def process_delete_unused_callback(update: Update, context: ContextTypes.D
     else:
         await query.edit_message_text("❌ Failed to delete code!")
 
+# ===== NEW: DELETE ANY CODE (USED OR UNUSED) =====
+async def admin_delete_any_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_admin(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    codes = db.get_codes()
+    if not codes:
+        await query.edit_message_text(
+            "📋 No codes to delete!",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
+        return
+    
+    keyboard = []
+    for c in codes[:15]:
+        code = c['code']
+        status = "✅" if not c.get('is_used') else "❌"
+        keyboard.append([InlineKeyboardButton(f"{status} {code}", callback_data=f"delany_{code}")])
+    
+    keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="admin")])
+    
+    await query.edit_message_text(
+        "❌ *DELETE ANY CODE*\n\n"
+        "Select a code to delete (used or unused):\n"
+        "⚠️ Deleting a used code won't revoke membership.\n"
+        "Use REVOKE MEMBERSHIP for that.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def process_delete_any_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_admin(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    code = query.data.replace('delany_', '')
+    code_data = db.get_code_by_value(code)
+    
+    if not code_data:
+        await query.edit_message_text("❌ Code not found!")
+        return
+    
+    was_used = code_data.get('is_used', False)
+    used_by = code_data.get('used_by')
+    
+    if db.delete_any_code(code):
+        msg = f"✅ Code `{code}` deleted!"
+        if was_used and used_by:
+            msg += f"\n\n⚠️ This code was used by user `{used_by}`.\nTheir membership is NOT revoked."
+            msg += f"\nUse `/revoke {used_by}` or the REVOKE button to cancel."
+        
+        await query.edit_message_text(
+            msg,
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
+    else:
+        await query.edit_message_text("❌ Failed to delete code!")
+
+# ===== NEW: REVOKE MEMBERSHIP BY CODE OR USER ID =====
+async def admin_revoke_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_admin(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    # Get used codes to show
+    codes = db.get_codes()
+    used_codes = [c for c in codes if c.get('is_used')]
+    
+    keyboard = []
+    
+    # Show used codes for quick revoke
+    for c in used_codes[:8]:
+        code = c['code']
+        used_by = c.get('used_by', 'Unknown')
+        keyboard.append([InlineKeyboardButton(
+            f"🚫 {code} → {used_by}", 
+            callback_data=f"revokecode_{code}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton("✏️ ENTER USER ID MANUALLY", callback_data="revoke_manual")])
+    keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="admin")])
+    
+    await query.edit_message_text(
+        "🚫 *REVOKE MEMBERSHIP*\n\n"
+        "Select a used code to revoke the associated member,\n"
+        "or enter a user ID manually.\n\n"
+        "This will cancel their premium access immediately.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def process_revoke_code_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_admin(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    code = query.data.replace('revokecode_', '')
+    
+    success, result = db.revoke_membership_by_code(code)
+    
+    if success:
+        await query.edit_message_text(
+            f"✅ *MEMBERSHIP REVOKED*\n\n"
+            f"Code: `{code}`\n"
+            f"User: `{result}`\n"
+            f"Status: Plan reset to FREE\n\n"
+            f"User can redeem a new code to get premium again.",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
+    else:
+        await query.edit_message_text(
+            f"❌ *REVOKE FAILED*\n\nReason: {result}",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="admin")]])
+        )
+
+async def revoke_manual_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "✏️ *REVOKE BY USER ID*\n\n"
+        "Send the user ID to revoke their membership:\n"
+        "Example: `123456789`\n\n"
+        "Send /cancel to cancel.",
+        parse_mode='Markdown'
+    )
+    context.user_data['awaiting_revoke'] = True
+
+async def process_revoke_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_revoke'):
+        return
+    
+    if update.message.text.lower() == '/cancel':
+        context.user_data['awaiting_revoke'] = False
+        await update.message.reply_text("✅ Cancelled.")
+        return
+    
+    admin_id = update.effective_user.id
+    if not db.is_admin(admin_id):
+        context.user_data['awaiting_revoke'] = False
+        return
+    
+    try:
+        target_user_id = int(update.message.text.strip())
+        
+        # Don't allow revoking owner/pseudo-owner
+        if db.is_owner_or_pseudo(target_user_id):
+            await update.message.reply_text("❌ Cannot revoke owner's membership!")
+            context.user_data['awaiting_revoke'] = False
+            return
+        
+        # Check if user exists
+        user = db.get_user(target_user_id)
+        if not user:
+            await update.message.reply_text(f"❌ User {target_user_id} not found!")
+            context.user_data['awaiting_revoke'] = False
+            return
+        
+        # Cancel membership
+        if db.cancel_user_membership(target_user_id):
+            await update.message.reply_text(
+                f"✅ *MEMBERSHIP REVOKED*\n\n"
+                f"User: `{target_user_id}`\n"
+                f"Plan reset to FREE\n\n"
+                f"They can redeem a new code to upgrade again.",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(f"❌ Failed to revoke membership for {target_user_id}")
+            
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID! Please send a number.")
+    
+    context.user_data['awaiting_revoke'] = False
+
+# ===== NEW: /revoke COMMAND =====
+async def revoke_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not db.is_admin(user_id):
+        await update.message.reply_text("❌ Admin access required!")
+        return
+    
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "🚫 *REVOKE MEMBERSHIP*\n\n"
+            "Usage: `/revoke USER_ID`\n"
+            "Example: `/revoke 123456789`\n\n"
+            "Or use `/revoke CODE` to revoke by redeem code.\n\n"
+            "This will cancel the user's premium access immediately.",
+            parse_mode='Markdown'
+        )
+        return
+    
+    target = args[0]
+    
+    # Check if it's a numeric user ID
+    if target.isdigit():
+        target_user_id = int(target)
+        
+        if db.is_owner_or_pseudo(target_user_id):
+            await update.message.reply_text("❌ Cannot revoke owner's membership!")
+            return
+        
+        user = db.get_user(target_user_id)
+        if not user:
+            await update.message.reply_text(f"❌ User {target_user_id} not found!")
+            return
+        
+        if db.cancel_user_membership(target_user_id):
+            await update.message.reply_text(
+                f"✅ *MEMBERSHIP REVOKED*\n\n"
+                f"User: `{target_user_id}`\n"
+                f"Plan reset to FREE\n\n"
+                f"They can redeem a new code to upgrade again.",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(f"❌ Failed to revoke membership for {target_user_id}")
+    else:
+        # Treat as code
+        code = target.upper()
+        success, result = db.revoke_membership_by_code(code)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ *MEMBERSHIP REVOKED*\n\n"
+                f"Code: `{code}`\n"
+                f"User: `{result}`\n"
+                f"Plan reset to FREE",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(f"❌ Failed: {result}")
+
 async def admin_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1507,6 +1833,7 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("✅ UNBAN USER", callback_data="owner_unban")],
         [InlineKeyboardButton("📋 LIST ADMINS", callback_data="owner_list_admins")],
         [InlineKeyboardButton("📋 LIST USERS", callback_data="owner_list_users")],
+        [InlineKeyboardButton("❌ CANCEL MEMBERSHIP", callback_data="owner_cancel_membership")],
         [InlineKeyboardButton(pause_text, callback_data="owner_pause")],
         [InlineKeyboardButton("🔌 API STATUS", callback_data="owner_api_status")],
         [InlineKeyboardButton("🛑 STOP ALL ATTACKS", callback_data="owner_stop")],
@@ -1523,6 +1850,126 @@ async def owner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
+
+async def owner_cancel_membership_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    # Get premium users
+    users = db.get_all_users()
+    premium_users = [u for u in users if u.get('plan') == 'premium' and not db.is_owner_or_pseudo(u.get('user_id'))]
+    
+    keyboard = []
+    for u in premium_users[:10]:
+        uid = u.get('user_id')
+        username = u.get('username', 'N/A')
+        keyboard.append([InlineKeyboardButton(
+            f"❌ {uid} - @{username}",
+            callback_data=f"cancelmem_{uid}"
+        )])
+    
+    keyboard.append([InlineKeyboardButton("✏️ ENTER USER ID", callback_data="cancelmem_manual")])
+    keyboard.append([InlineKeyboardButton("🔙 BACK", callback_data="owner")])
+    
+    await query.edit_message_text(
+        "❌ *CANCEL MEMBERSHIP*\n\n"
+        "Select a premium user to cancel their membership,\n"
+        "or enter a user ID manually.\n\n"
+        "This will reset their plan to FREE immediately.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
+async def process_cancel_membership_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    if not db.is_owner_or_pseudo(user_id):
+        await query.answer("Access denied!", show_alert=True)
+        return
+    
+    target_user_id = int(query.data.replace('cancelmem_', ''))
+    
+    if db.is_owner_or_pseudo(target_user_id):
+        await query.edit_message_text("❌ Cannot cancel owner's membership!")
+        return
+    
+    if db.cancel_user_membership(target_user_id):
+        await query.edit_message_text(
+            f"✅ *MEMBERSHIP CANCELLED*\n\n"
+            f"User: `{target_user_id}`\n"
+            f"Plan reset to FREE\n\n"
+            f"They can redeem a new code to upgrade again.",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+        )
+    else:
+        await query.edit_message_text(
+            f"❌ Failed to cancel membership for {target_user_id}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 BACK", callback_data="owner")]])
+        )
+
+async def cancel_membership_manual_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    await query.edit_message_text(
+        "✏️ *CANCEL MEMBERSHIP BY USER ID*\n\n"
+        "Send the user ID to cancel their membership:\n"
+        "Example: `123456789`\n\n"
+        "Send /cancel to cancel.",
+        parse_mode='Markdown'
+    )
+    context.user_data['awaiting_cancel_membership'] = True
+
+async def process_cancel_membership_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get('awaiting_cancel_membership'):
+        return
+    
+    if update.message.text.lower() == '/cancel':
+        context.user_data['awaiting_cancel_membership'] = False
+        await update.message.reply_text("✅ Cancelled.")
+        return
+    
+    admin_id = update.effective_user.id
+    if not db.is_owner_or_pseudo(admin_id):
+        context.user_data['awaiting_cancel_membership'] = False
+        return
+    
+    try:
+        target_user_id = int(update.message.text.strip())
+        
+        if db.is_owner_or_pseudo(target_user_id):
+            await update.message.reply_text("❌ Cannot cancel owner's membership!")
+            context.user_data['awaiting_cancel_membership'] = False
+            return
+        
+        user = db.get_user(target_user_id)
+        if not user:
+            await update.message.reply_text(f"❌ User {target_user_id} not found!")
+            context.user_data['awaiting_cancel_membership'] = False
+            return
+        
+        if db.cancel_user_membership(target_user_id):
+            await update.message.reply_text(
+                f"✅ *MEMBERSHIP CANCELLED*\n\n"
+                f"User: `{target_user_id}`\n"
+                f"Plan reset to FREE\n\n"
+                f"They can redeem a new code to upgrade again.",
+                parse_mode='Markdown'
+            )
+        else:
+            await update.message.reply_text(f"❌ Failed to cancel membership for {target_user_id}")
+    except ValueError:
+        await update.message.reply_text("❌ Invalid user ID!")
+    
+    context.user_data['awaiting_cancel_membership'] = False
 
 async def owner_concurrent_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1738,7 +2185,6 @@ async def owner_list_admins_callback(update: Update, context: ContextTypes.DEFAU
     for admin in admins:
         level = admin.get('level', 'admin').upper()
         admin_id = admin['user_id']
-        # Get username for admin
         user = db.get_user(admin_id)
         username = user.get('username', 'N/A') if user else 'N/A'
         text += f"• {admin_id} - @{username} - {level}\n"
@@ -1871,6 +2317,10 @@ async def message_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_unban(update, context)
     elif context.user_data.get('awaiting_broadcast'):
         await process_broadcast(update, context)
+    elif context.user_data.get('awaiting_revoke'):
+        await process_revoke_manual(update, context)
+    elif context.user_data.get('awaiting_cancel_membership'):
+        await process_cancel_membership_manual(update, context)
 
 async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.user_data.get('awaiting_attack'):
@@ -1881,7 +2331,6 @@ async def process_attack(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Cancelled.")
         return
     
-    # Call attack_command with the text as args
     args = update.message.text.split()
     context.args = args
     await attack_command(update, context)
@@ -1905,9 +2354,9 @@ def main():
     print("  /setconcurrent NUMBER - Change concurrent value")
     print("  /status - Show bot status")
     print("  /redeem CODE - Redeem premium code")
+    print("  /revoke USER_ID|CODE - Revoke membership")
     print("=" * 60)
     
-    # Create application
     bot_app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     # COMMANDS
@@ -1918,6 +2367,7 @@ def main():
     bot_app.add_handler(CommandHandler("testapi", testapi_command))
     bot_app.add_handler(CommandHandler("status", status_command))
     bot_app.add_handler(CommandHandler("redeem", redeem_command))
+    bot_app.add_handler(CommandHandler("revoke", revoke_command))  # NEW
     bot_app.add_handler(CommandHandler("cancel", cancel))
     
     # CALLBACK QUERY HANDLERS
@@ -1931,8 +2381,13 @@ def main():
     bot_app.add_handler(CallbackQueryHandler(process_gen_callback, pattern="^gen_"))
     bot_app.add_handler(CallbackQueryHandler(admin_list_callback, pattern="^admin_list$"))
     bot_app.add_handler(CallbackQueryHandler(admin_delete_callback, pattern="^admin_delete$"))
+    bot_app.add_handler(CallbackQueryHandler(admin_delete_any_callback, pattern="^admin_delete_any$"))  # NEW
+    bot_app.add_handler(CallbackQueryHandler(admin_revoke_callback, pattern="^admin_revoke$"))  # NEW
     bot_app.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
     bot_app.add_handler(CallbackQueryHandler(process_delete_unused_callback, pattern="^delunused_"))
+    bot_app.add_handler(CallbackQueryHandler(process_delete_any_callback, pattern="^delany_"))  # NEW
+    bot_app.add_handler(CallbackQueryHandler(process_revoke_code_callback, pattern="^revokecode_"))  # NEW
+    bot_app.add_handler(CallbackQueryHandler(revoke_manual_callback, pattern="^revoke_manual$"))  # NEW
     bot_app.add_handler(CallbackQueryHandler(owner_callback, pattern="^owner$"))
     bot_app.add_handler(CallbackQueryHandler(owner_concurrent_callback, pattern="^owner_concurrent$"))
     bot_app.add_handler(CallbackQueryHandler(owner_pause_callback, pattern="^owner_pause$"))
@@ -1942,13 +2397,15 @@ def main():
     bot_app.add_handler(CallbackQueryHandler(owner_unban_callback, pattern="^owner_unban$"))
     bot_app.add_handler(CallbackQueryHandler(owner_list_admins_callback, pattern="^owner_list_admins$"))
     bot_app.add_handler(CallbackQueryHandler(owner_list_users_callback, pattern="^owner_list_users$"))
+    bot_app.add_handler(CallbackQueryHandler(owner_cancel_membership_callback, pattern="^owner_cancel_membership$"))  # NEW
+    bot_app.add_handler(CallbackQueryHandler(cancel_membership_manual_callback, pattern="^cancelmem_manual$"))  # NEW
     bot_app.add_handler(CallbackQueryHandler(owner_api_status, pattern="^owner_api_status$"))
     bot_app.add_handler(CallbackQueryHandler(owner_stop_callback, pattern="^owner_stop$"))
     bot_app.add_handler(CallbackQueryHandler(process_demote, pattern="^demote_"))
+    bot_app.add_handler(CallbackQueryHandler(process_cancel_membership_callback, pattern="^cancelmem_"))  # NEW
     
     bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_router))
     
-    # Start bot
     print("✅ Bot started! Press Ctrl+C to stop.")
     bot_app.run_polling(allowed_updates=Update.ALL_TYPES)
 
