@@ -41,7 +41,7 @@ TOTAL_CONCURRENT = 8  # Total API concurrent limit
 
 # ATTACK METHODS
 ATTACK_METHODS = [
-    "UDP-FLOOD",  # DEFAULT
+    "UDP-FREE",  # DEFAULT
     "UDP-VSE", "UDP-DNS",
     "TCP-SYN", "TCP-ACK", "TCP-STOMP", "TCP-HANDSHAKE",
     "ICMP-FLOOD", "GRE-FLOOD",
@@ -49,7 +49,7 @@ ATTACK_METHODS = [
 ]
 
 METHOD_MAP = {
-    "UDP-FLOOD": "UDP-FLOOD",
+    "UDP-FREE": "UDP-FREE",
     "UDP-VSE": "UDP-VSE", 
     "UDP-DNS": "UDP-DNS",
     "TCP-SYN": "TCP-SYN",
